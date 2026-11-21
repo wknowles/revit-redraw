@@ -1,4 +1,4 @@
-# Design — Redraw workflow (current state, MVP2.4C)
+# Design — Redraw workflow (current state)
 
 Reference for future features. Runtime facts and editing rules live in `AGENTS.md`;
 this file describes *how the workflow works and why*. Change history: `CHANGELOG.md`.
@@ -15,6 +15,9 @@ Deferred work and known gaps: `ROADMAP.md`.
 
 Room Number is the stand key and is assumed **globally unique** (business decision).
 Duplicates are errors in graph 1 and skipped-with-QA in graph 2.
+
+After graph 1 the Redraw is saved and closed and Main is active. The intended user
+flow is: close Main → open the Redraw → edit/save/close → reopen Main → run graph 2.
 
 ## 2. Graph 1 — Create Redraw
 
@@ -39,9 +42,11 @@ Afterwards `doc.IsModified` must be false, else abort. Nothing is relinquished �
 the operator keeps their worksets/ownership.
 
 ### Baseline extraction (`extract`)
-- Boundary location **Finish**, coordinates/measurements in Revit internal feet,
-  rounded to 9 decimals. Lines and arcs stored natively (`LINE`, `ARC`); anything
-  else tessellated to `POLYLINE` with max chord 1/12 ft (1 inch).
+- Boundary location **Center** (wall centerline), coordinates/measurements in Revit
+  internal feet, rounded to 9 decimals. Lines and arcs stored natively (`LINE`,
+  `ARC`); anything else tessellated to `POLYLINE` with max chord 1/12 ft (1 inch).
+  `area_internal_sqft` still comes from `Room.Area` (Revit's room area computation);
+  loops, perimeter and centroid are centerline.
 - Every numbered Room is retained, including unplaced and placed-but-unbounded ones
   (`placement_status` from `Room.IsPlaced`, `has_geometry` flag). Blank numbers are
   skipped with a warning; duplicate numbers and extraction exceptions are ERRORs and
@@ -56,21 +61,26 @@ the operator keeps their worksets/ownership.
   `Stand Length`, `Stand Width`. Values read as text (`AsString`, fallback
   `AsValueString`), with `PARAMETER_NOT_FOUND` / `NO_VALUE` / `READ_ERROR` statuses.
 
-### Detached copy (`save_detached`)
-| Source | Flow | `redraw_mode` | Active doc afterwards |
+### Detached copy / active-document outcome (`save_detached`)
+| Source | Flow | `redraw_mode` | End state |
 |---|---|---|---|
-| Non-workshared | direct `SaveAs` | `DIRECT` | the new Redraw |
-| Local workshared | open central with `DetachAndDiscardWorksets`, `SaveAs` target, close | `DETACHED_LOCAL` | Main |
-| Cloud workshared (or local fallback) | `SaveAs` temp local central (`SaveAsCentral=True`) → `Application.CopyModel` to temp2 → open temp2 detached → `SaveAs` target → close/delete temp2 | `DETACHED_TEMP_CENTRAL` | temporary local central — operator must close/delete it and reopen Main |
+| Local non-workshared | `Application.CopyModel` to target; fallback `SaveAs` if copy fails | `COPIED` / `SAVED_COPY` | Main active, Redraw closed |
+| Cloud non-workshared | `SaveAs` local target, reactivate Main, close target | `CLOUD_SAVED` | Main active, Redraw closed (best effort) |
+| Local workshared | open central detached (`DetachAndDiscardWorksets`), `SaveAs` target, close | `DETACHED_LOCAL` | Main active, Redraw closed |
+| Cloud workshared / local fallback | `SaveAs` temp local central (`SaveAsCentral=True`) → `Application.CopyModel` → open detached → `SaveAs` target → reactivate Main → close/delete temp | `DETACHED_TEMP_CENTRAL` | Main active, Redraw closed, temp deleted |
 
 Why the cloud detour: `DetachFromCentralOption` is invalid for cloud model paths and
 `Application.CopyModel` does not accept cloud paths, so the cloud model must first be
-saved down to a local central. Leaving that temp central open is a deliberate safety
-fallback (closing documents programmatically around a cloud `SaveAs` is risky); the
-QA warning tells the operator exactly what to clean up.
+saved down to a local central.
+
+After the target exists, `leave_main_active` uses
+`UIApplication.OpenAndActivateDocument` to bring Main back, then closes the previous
+Redraw/temp document and deletes temp files. If activation or cleanup fails, the
+summary reports `SUCCESS WITH WARNINGS`, `main_active`/`redraw_closed`/
+`temp_central_cleaned` are false, and QA names what to close manually.
 
 The baseline is written to `<sidecar>.pending` **before** the copy and renamed into
-place only after `SaveAs` succeeds; both files are then size-verified. On failure the
+place only after the target exists; both files are then size-verified. On failure the
 pending file is removed and QA warns that a partial Redraw may need deleting.
 
 ### Baseline JSON contract (`schema_version "1.0"`)
@@ -82,8 +92,9 @@ Top level: `schema_version`, `snapshot_type: "REDRAW_BASELINE"`, `baseline_id` (
 - `source`: `document_title`, `source_display_path`, `central_display_path`,
   `model_type` (`LOCAL`/`WORKSHARED`/`CLOUD`/`CLOUD_WORKSHARED`), `project_name`,
   `project_number`, `revit_version`, `is_cloud_model`, `is_workshared`.
-- `extraction_settings`: `boundary_location: "Finish"`, decimal counts, tessellation
-  chord, `audited_room_parameters` (9), `merge_parameters` (6).
+- `extraction_settings`: `boundary_location: "Center"` (legacy `"Finish"` accepted
+  by graph 2), decimal counts, tessellation chord, `audited_room_parameters` (9),
+  `merge_parameters` (6).
 - Written with `json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)`.
 
 ## 3. Graph 2 — Compare and Update
@@ -95,12 +106,14 @@ internal feet via `UnitUtils`. `OUT = (summary, pout, gout, issues, qa)`; only
 indices 0–3 are wired (see `AGENTS.md` output-wiring gotcha).
 
 ### Pipeline
-1. **Files**: exactly one primary `.rvt` + one `*.baseline.json` in the folder.
+1. **Files/active document**: exactly one primary `.rvt` + one `*.baseline.json` in
+   the folder; fail if the active document is the Redraw or the Redraw RVT is open.
 2. **Validate** (`validate`): schema/snapshot, required filenames matching the actual
-   files, `boundary_location == "Finish"`, `merge_parameters` equal to the graph's
-   list when present, non-empty `stands`, project number match against Main's
-   Project Information Number. Mismatch → fatal; missing on either side →
-   `IDENTITY WARNING` in `issues` (wired) and `qa`.
+   files, `boundary_location` `"Center"` or `"Finish"` (returned for use by
+   `collect`), `merge_parameters` equal to the graph's list when present, non-empty
+   `stands`, project number match against Main's Project Information Number.
+   Mismatch → fatal; missing on either side → `IDENTITY WARNING` in `issues` (wired)
+   and `qa`.
 3. **Link** (`add_link`): find existing link type by absolute external-file path;
    `Load()` it if unloaded (outside transactions — `Load` clears undo history);
    reuse an existing instance of that type, else create type+instance in one
@@ -108,7 +121,8 @@ indices 0–3 are wired (see `AGENTS.md` output-wiring gotcha).
    cleanup always has the type id. Redraw rooms are read through
    `GetTotalTransform()` into Main coordinates.
 4. **Collect**: three-way states — baseline (`bases`, curves rebuilt from JSON),
-   Main, Redraw — each with parameters, boundary loops, wall descriptors
+   Main, Redraw — at the baseline's boundary location (`Center` or legacy `Finish`).
+   Each state has parameters, boundary loops, wall descriptors
    (type/level/height/offset/flipped/curve), centroid, room point, level id/name.
 5. **Plan** per stand present in all three:
    - Geometry change class from baseline→Main and baseline→Redraw:
@@ -152,6 +166,13 @@ still loads/removes the link.
   work; the old optional boolean was misleading and is gone.
 - **Detached, non-workshared Redraw** — designers edit without worksharing overhead;
   `DetachAndDiscardWorksets` keeps the copy clean.
+- **Centerline boundaries** — graph 1 extracts at `SpatialElementBoundaryLocation.Center`
+  so Redraw geometry follows wall centerlines; graph 2 honors the baseline location
+  for Main, Redraw and verification. Model-level room area settings are not changed.
+- **Main active, Redraw closed after graph 1** — the user closes Main, opens the
+  Redraw, edits/saves/closes it, reopens Main and runs graph 2. Graph 1 attempts this
+  for every source type and reports cleanup warnings instead of silently leaving a
+  temp central active.
 - **Room Number as global key** — agreed unique across levels/phases; metadata
   (level/phase/option/workset) is recorded for auditing and the level gate, not as
   part of the key.
@@ -162,13 +183,18 @@ still loads/removes the link.
 - **Narrow geometry scope** — only REDRAW_ONLY changes on existing rooms bounded by
   the two hardcoded RX wall types; everything else is skipped/reported, never
   auto-fixed. Conservative by design.
-- **Cloud temp-central left open** — deliberate safety fallback; operator cleans up.
 - **Late link removal** — verification needs live link geometry.
 
 ## 5. Revit API facts relied on (verified against docs)
 
 - `DetachFromCentralOption` cannot be used with cloud model paths;
-  `Application.CopyModel` does not support cloud paths.
+  `Application.CopyModel` does not support cloud paths (it does copy local files
+  without changing the active document).
+- `SpatialElementBoundaryLocation.Finish` is the finish face; `.Center` is the wall
+  centerline; `.CoreCenter`/`.CoreBoundary` are the compound-wall core variants.
+- `UIApplication.OpenAndActivateDocument(ModelPath, OpenOptions, bool)` opens or
+  activates a document and changes the active document; it must run with no open
+  transaction.
 - `Document.IsModelInCloud`, `Document.SaveCloudModel()`,
   `Document.SynchronizeWithCentral(TransactWithCentralOptions, SynchronizeWithCentralOptions)`;
   `SynchronizeWithCentralOptions.SetRelinquishOptions/SaveLocalAfter/Comment`.

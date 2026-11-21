@@ -4,35 +4,43 @@ Companion to `DESIGN.md` (current behaviour) and `CHANGELOG.md` (what changed).
 Everything here is intentionally out of scope today; treat it as the input list for
 future feature work.
 
-## 1. Must verify in Revit 2027 before trusting the MVP2.4C build
+## 1. Must verify in Revit 2027 before trusting the current build
 
 No Revit/Dynamo runtime was available during the build; only static checks and
 mocked pure-function tests passed. Run this checklist first:
 
 ### Graph 1
-- [ ] Non-workshared Main: saves, Redraw + baseline created, **Redraw becomes active**,
-      baseline counts/geometry/parameters look right.
-- [ ] Local workshared Main: syncs without relinquishing, **Main stays active**,
-      Redraw opens detached with no worksets, baseline written.
-- [ ] Cloud workshared Main: syncs, temp local central created, Redraw detached
-      correctly, temp2 deleted, QA warning names the temp central; operator can
-      close/delete it and reopen Main.
-- [ ] Cloud non-workshared Main: `SaveCloudModel` path works; direct `SaveAs` to a
-      local Redraw succeeds.
+- [ ] Local non-workshared Main: `CopyModel` creates the Redraw without activating it;
+      **Main active, Redraw closed**, baseline counts/geometry/parameters look right.
+- [ ] Local workshared Main: syncs without relinquishing, detached Redraw has no
+      worksets, **Main active, Redraw closed**.
+- [ ] Cloud non-workshared Main: `SaveCloudModel` then local `SaveAs`; **Main
+      reactivated and Redraw closed** (best effort; confirm no host-document issue).
+- [ ] Cloud workshared Main: syncs, temp local central created, Redraw detached,
+      **Main reactivated, temp central closed/deleted**. If Revit refuses, QA must
+      identify the temp path.
+- [ ] Centerline boundary: a Room beside a thick wall has baseline loops on the wall
+      centerline, not the finish face; perimeter/centroid follow those loops.
 - [ ] Refusals: existing `.rvt`/`.baseline.json` pair; another primary RVT or baseline
       in the folder; never-saved local file; duplicate/blank Room Numbers; unplaced
       and unbounded rooms retained with correct statuses.
 - [ ] Failure atomicity: force a `SaveAs` failure and confirm no orphan `.pending`
       sidecar and a clear QA warning about a partial Redraw.
+- [ ] Active-document cleanup failure: simulate inability to reactivate Main/close
+      Redraw; summary reports `SUCCESS WITH WARNINGS` and QA names the manual step.
 
 ### Graph 2
-- [ ] Dry run (`Apply Updates` false): plans only, link loaded then removed.
+- [ ] Guards: active document is the Redraw → fatal; Redraw RVT still open → fatal.
+- [ ] Dry run (`Apply Updates` false) from Main with Redraw closed: plans only, link
+      loaded then removed. Unchanged model → no geometry changes.
 - [ ] Apply: REDRAW_ONLY parameter writes verified; REDRAW_ONLY geometry rebuilds
       walls, moves room, recenters tags in the active view; **Undo is one step**.
 - [ ] Level mismatch (Main or Redraw room on a different level) → geometry skipped,
       parameters still merged.
 - [ ] Project number mismatch → fatal; missing number → `IDENTITY WARNING` visible
       in the issues watch.
+- [ ] New `Center` baseline and legacy `Finish` baseline both work; Main/Redraw/
+      Verify use the baseline's boundary location.
 - [ ] Old baseline (pre-MVP2.4C, no level metadata / `merge_parameters`) still passes
       validation and behaves sanely.
 - [ ] Pre-existing Redraw link type (loaded and unloaded) is reused, not duplicated;
@@ -52,8 +60,10 @@ mocked pure-function tests passed. Run this checklist first:
 - **Wall rebuild** copies type/height/offset/flipped from Redraw; height fallback
   10 ft; joins, inserts (doors/openings) and wall-type variations beyond the two RX
   types are not handled.
-- **Cloud workshared flow leaves a temporary local central open** — manual cleanup
-  by the operator; graph 2 must not be run until Main is reopened.
+- **Cloud/temp cleanup is best effort** — graph 1 tries to reactivate Main and
+  close/delete the temp central, but Revit may refuse to close a document hosting
+  the Dynamo run. In that case the summary warns and the operator must clean up
+  manually.
 - **Graph 2 `qa` (`OUT[4]`) is not wired**; fatal reasons are only visible via the
   Summary status or by inspecting the node. Watch labels for `gout`/`issues` are
   misnamed ("Parameter Conflicts"/"Errors").
@@ -63,8 +73,8 @@ mocked pure-function tests passed. Run this checklist first:
   (see `AGENTS.md` verification recipe). Pre-MVP2.4C backups exist only in the
   session temp folder and are ephemeral.
 - Graph 2's apply transaction is still named `MVP2.4B6 - Merge Redraw Updates`
-  (kept for continuity); graph names in the `.dyn` metadata are stale
-  ("MVP 2.3A", "2.1 Redraw Comparison (Auto)").
+  (kept for continuity); transaction names retain MVP prefixes even though the
+  graph `Name` fields are now `Create Redraw` / `Compare and Update Redraw`.
 
 ## 3. Candidate future features
 
@@ -77,10 +87,10 @@ Ordered roughly by value/effort; none are committed.
    checked into the repo as a manual test fixture.
 3. **Add a pre-commit check** for JSON validity and embedded `py_compile` (the
    `AGENTS.md` recipe automated); the repo and initial commit already exist.
-4. **Automate cloud temp-central cleanup**: close/delete the temporary central via
-   API after the detached `SaveAs`, or investigate a supported cloud→local detach
-   path that avoids the temp central entirely. Needs careful Revit testing; the
-   current manual fallback is the safe baseline.
+4. **Harden cloud temp-central cleanup**: graph 1 now attempts to reactivate Main,
+   close/delete the temp central and close the Redraw; verify this in Revit. If
+   closing the host document is refused, investigate a supported cloud→local detach
+   path or a safe deferred close (e.g. Idling event) instead of the manual fallback.
 5. **Added/removed room handling**: report-only today; next step could be guided
    creation of new rooms/walls from Redraw, or explicit deletion plans — both need
    new conflict rules and probably a review step.
@@ -93,16 +103,17 @@ Ordered roughly by value/effort; none are committed.
 10. **QA sidecar / audit trail** (was explicitly deferred): persist QA + merge
     results next to the baseline if the business wants a record; would change the
     one-RVT/one-JSON folder contract.
-11. **Version/metadata hygiene**: bump graph `Name` fields and transaction names
-    together; keep `schema_version` bumps coordinated across both graphs.
+11. **Transaction/version hygiene**: decide whether to drop MVP prefixes from the
+    apply/link transaction names; keep `schema_version` bumps coordinated across
+    both graphs.
 12. **Parameterise wall types / merged parameters** instead of hardcoding, if the
     business rules start varying per project (keep the cross-graph contract check).
 
 ## 4. Contract rules for any future change
 
 - Baseline schema changes must update **both** graphs and `schema_version`;
-  graph 2 validates schema/snapshot/filenames/`Finish`/`merge_parameters`/project
-  number and will reject mismatches.
+  graph 2 validates schema/snapshot/filenames, `Center` or legacy `Finish`,
+  `merge_parameters` and project number, and will reject mismatches.
 - The 9 audited vs 6 merged parameter lists are a business rule; change them in both
   graphs together (`AUDIT_PARAMETERS` / `MERGE_PARAMETERS` in graph 1, `PARAMS` in
   graph 2) and update `AGENTS.md`/`DESIGN.md`.

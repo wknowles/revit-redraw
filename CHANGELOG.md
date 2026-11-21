@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-11-21 — Centerline boundaries, clean names, Main-active workflow
+
+- **Graph 1 boundary extraction** now uses `SpatialElementBoundaryLocation.Center`
+  (wall centerline); new baselines write `extraction_settings.boundary_location:
+  "Center"`. `area_internal_sqft` still comes from `Room.Area`; loops, perimeter and
+  centroid are centerline. No model-level room area setting is changed.
+- **Graph 2** reads `boundary_location` from the baseline and uses it for Main,
+  Redraw and post-apply verification. `"Center"` and legacy `"Finish"` are accepted,
+  so old baselines still work.
+- **Active-document workflow** is now consistent in intent: graph 1 saves/closes the
+  Redraw and leaves Main active for every source type. Local non-workshared uses
+  `Application.CopyModel` so Main is not activated away; cloud/workshared paths
+  reactivate Main and close/delete temp documents after the Redraw is written. If
+  cleanup fails, the summary is `SUCCESS WITH WARNINGS` and QA names the manual step.
+- **Intended user flow:** close Main, open the Redraw to edit, save/close it, reopen
+  Main, then run graph 2.
+- **Graph 2 guards** now fail if the active document is the Redraw or if the Redraw
+  RVT is still open.
+- **Graph names** are now `Create Redraw` and `Compare and Update Redraw`; MVP prefixes
+  removed from the embedded docstring titles. Transaction names retain their existing
+  MVP labels.
+- Docs updated (`AGENTS.md`, `DESIGN.md`, `ROADMAP.md`). Static JSON/`py_compile`
+  checks pass; active-document and cloud cleanup behaviour still need Revit testing.
+
 ## 2026-11-21 — Privacy cleanup for public repo
 
 - Blanked the Directory Path defaults in both graphs: `Inputs[0].Value`, plus the

@@ -14,14 +14,14 @@
 
 ## Workflow gotchas
 - Graph 1 always saves the active Main, or synchronizes it with central when workshared, before extracting the baseline and copying. The old `Save Before Creating Redraw` boolean no longer exists.
-- Active document after graph 1: non-workshared → the new Redraw is active; local workshared → Main stays active; cloud workshared → a temporary local central is active. Close/delete that temporary central and reopen Main before graph 2.
+- After graph 1 the Redraw is saved and **closed**, and Main is active again. The intended workflow is: close Main, open the Redraw, edit/save/close it, reopen Main, then run graph 2. Graph 1 attempts the same end state for local, cloud and workshared sources; if activation/cleanup fails, the Summary says so and QA names what to close manually.
 - Graph 1 refuses to run if the target `.rvt` or `.baseline.json` already exists; delete/rename the pair to regenerate.
-- Graph 2 requires the directory to contain exactly one primary `.rvt` (backup files matching `*.NNNN.rvt` are ignored) and exactly one `*.baseline.json`.
+- Graph 2 requires the directory to contain exactly one primary `.rvt` (backup files matching `*.NNNN.rvt` are ignored) and exactly one `*.baseline.json`. Run it from Main with the Redraw closed; it fails if the Redraw is the active/open document.
 - Graph 2 is a dry run when `Apply Updates` is false; the saved graph defaults it to **true**. Applied edits are one transaction named `MVP2.4B6 - Merge Redraw Updates`, so Undo is one step.
 - Graph 2 reuses/loads an existing Redraw link type when present instead of creating a duplicate, then removes the link type after verification.
 
 ## Cross-script contract
-- Baseline JSON uses `schema_version: "1.0"`, `snapshot_type: "REDRAW_BASELINE"`, and `stands` keyed by Room Number. Graph 2 validates schema/snapshot, `redraw.filename`, `redraw.sidecar_filename`, `extraction_settings.boundary_location == "Finish"`, and the source project number when both sides have one.
+- Baseline JSON uses `schema_version: "1.0"`, `snapshot_type: "REDRAW_BASELINE"`, and `stands` keyed by Room Number. New baselines use `extraction_settings.boundary_location: "Center"`; Graph 2 accepts `"Center"` or legacy `"Finish"` and uses the same location for Main, Redraw and verification. Graph 2 also validates schema/snapshot, `redraw.filename`, `redraw.sidecar_filename`, and the source project number when both sides have one.
 - Baseline coordinates/measurements are Revit internal units (feet); graph 2's tolerance and spacing inputs are metres and converted internally.
 - Graph 1 audits 9 parameters (includes `Corners`, `Stand Length`, `Stand Width`); graph 2 only compares/updates 6 (`Floorplan Hall/Pavilion/Sector`, `Obstruction Area`, `Product Code`, `Custom Area`). Keep both lists in sync only if the business rules change.
 - Baseline stands include level, phase, design-option, and workset metadata; graph 2 skips geometry moves when Main or Redraw Room levels do not match the baseline.
