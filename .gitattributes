@@ -1,0 +1,5 @@
+# Dynamo graphs are CRLF JSON; keep that in the working tree on every platform.
+*.dyn text eol=crlf
+
+# Docs are LF.
+*.md text eol=lf

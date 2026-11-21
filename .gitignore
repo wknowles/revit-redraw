@@ -1,0 +1,27 @@
+# Revit models and Redraw outputs (can contain project/room data)
+*.rvt
+*.rvt.*
+*.rte
+*.rft
+*.rws
+*.baseline.json
+*.baseline.json.pending
+*.pending
+
+# Dynamo / Revit backups
+*.dyn.bak
+*.dyn.autosave
+backup/
+.backup/
+.dynamo/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]

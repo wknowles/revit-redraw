@@ -1,0 +1,429 @@
+{
+  "Uuid": "68686aa0-7e0a-4d2c-b10c-022a7623b8c1",
+  "IsCustomNode": false,
+  "Description": "",
+  "Name": "Create Redraw - MVP 2.3A",
+  "ElementResolver": {
+    "ResolutionMap": {}
+  },
+  "Inputs": [
+    {
+      "Id": "36d1098c51da47f58480cec7bb68c182",
+      "Name": "Directory Path",
+      "Type": "string",
+      "Type2": "string",
+      "Value": "",
+      "Description": "Allows you to select a directory on the system and returns its path"
+    }
+  ],
+  "Outputs": [
+    {
+      "Id": "8fdc7897691a428294e419c59198c498",
+      "Name": "Summary",
+      "Type": "unknown",
+      "InitialValue": "",
+      "Description": "Visualizes a node's output"
+    },
+    {
+      "Id": "4cf445661612402896cc43b76bc988c4",
+      "Name": "QA",
+      "Type": "unknown",
+      "InitialValue": "",
+      "Description": "Visualizes a node's output"
+    }
+  ],
+  "Nodes": [
+    {
+      "ConcreteType": "PythonNodeModels.PythonNode, PythonNodeModels",
+      "Code": "# -*- coding: utf-8 -*-\r\n\"\"\"MVP2.4C Create Redraw - Revit 2027 / Dynamo CPython3.\r\nIN[0]: target directory.\r\nOUT: (summary, qa)\r\n\r\nCreates a detached local Redraw RVT and adjacent baseline JSON from the active Main.\r\nThe active Main is always saved, or synchronized with central when workshared, before\r\ncopying so local unsaved changes are included in the Redraw.\r\n\r\nActive-document result:\r\n- non-workshared: the new Redraw becomes active;\r\n- local workshared: Main stays active;\r\n- cloud workshared: a temporary local central becomes active; reopen Main afterwards.\r\n\"\"\"\r\nimport clr, os, json, math, re, uuid, tempfile\r\nfrom datetime import datetime, timezone\r\nclr.AddReference(\"RevitAPI\")\r\nclr.AddReference(\"RevitServices\")\r\nfrom Autodesk.Revit.DB import (Arc, Line, XYZ, LocationPoint, BuiltInCategory,\r\n    FilteredElementCollector, SpatialElementBoundaryOptions,\r\n    SpatialElementBoundaryLocation, SpecTypeId, UnitUtils, SaveAsOptions,\r\n    WorksharingSaveAsOptions, WorksharingUtils, ModelPathUtils, FilePath,\r\n    OpenOptions, DetachFromCentralOption, TransactWithCentralOptions,\r\n    SynchronizeWithCentralOptions, RelinquishOptions)\r\nfrom RevitServices.Persistence import DocumentManager\r\n\r\ndoc = DocumentManager.Instance.CurrentDBDocument\r\nDEC = 9\r\nMAX_CHORD_FT = 1.0 / 12.0\r\nAUDIT_PARAMETERS = [\r\n    \"Corners\",\r\n    \"Floorplan Hall\",\r\n    \"Floorplan Pavilion\",\r\n    \"Floorplan Sector\",\r\n    \"Obstruction Area\",\r\n    \"Product Code\",\r\n    \"Custom Area\",\r\n    \"Stand Length\",\r\n    \"Stand Width\"\r\n]\r\nMERGE_PARAMETERS = [\r\n    \"Floorplan Hall\",\r\n    \"Floorplan Pavilion\",\r\n    \"Floorplan Sector\",\r\n    \"Obstruction Area\",\r\n    \"Product Code\",\r\n    \"Custom Area\"\r\n]\r\n\r\ndef get_in(i, default=None):\r\n    try:\r\n        return default if IN[i] is None else IN[i]\r\n    except: return default\r\n\r\ndef as_path(v):\r\n    if v is None: return None\r\n    for a in (\"FullName\", \"Path\"):\r\n        try:\r\n            x = getattr(v, a)\r\n            if x: return str(x)\r\n        except: pass\r\n    return str(v)\r\n\r\ndef r(v): return round(float(v), DEC)\r\ndef jp(p): return [r(p.X), r(p.Y), r(p.Z)]\r\ndef dist(a,b): return math.sqrt((a.X-b.X)**2+(a.Y-b.Y)**2+(a.Z-b.Z)**2)\r\ndef same(a,b): return dist(a,b) <= 1e-9\r\n\r\ndef eid_int(eid):\r\n    try: return int(eid.Value)\r\n    except: return int(eid.IntegerValue)\r\n\r\ndef tess(curve):\r\n    pts=list(curve.Tessellate())\r\n    if len(pts)<2: pts=[curve.GetEndPoint(0),curve.GetEndPoint(1)]\r\n    out=[pts[0]]\r\n    for i in range(1,len(pts)):\r\n        a,b=pts[i-1],pts[i]\r\n        n=max(1,int(math.ceil(dist(a,b)/MAX_CHORD_FT)))\r\n        for j in range(1,n+1):\r\n            t=float(j)/n\r\n            out.append(XYZ(a.X+(b.X-a.X)*t,a.Y+(b.Y-a.Y)*t,a.Z+(b.Z-a.Z)*t))\r\n    return out\r\n\r\ndef curve_json(c):\r\n    if isinstance(c,Line):\r\n        return {\"type\":\"LINE\",\"start\":jp(c.GetEndPoint(0)),\"end\":jp(c.GetEndPoint(1))}\r\n    if isinstance(c,Arc):\r\n        return {\"type\":\"ARC\",\"start\":jp(c.GetEndPoint(0)),\"mid\":jp(c.Evaluate(.5,True)),\"end\":jp(c.GetEndPoint(1))}\r\n    return {\"type\":\"POLYLINE\",\"source_curve_type\":c.GetType().Name,\"points\":[jp(p) for p in tess(c)]}\r\n\r\ndef loop_points(curves):\r\n    out=[]\r\n    for c in curves:\r\n        pts=[c.GetEndPoint(0),c.GetEndPoint(1)] if isinstance(c,Line) else list(c.Tessellate())\r\n        if len(pts)<2: pts=[c.GetEndPoint(0),c.GetEndPoint(1)]\r\n        if not out: out.extend(pts)\r\n        elif same(out[-1],pts[0]): out.extend(pts[1:])\r\n        else: out.extend(pts)\r\n    if out and not same(out[0],out[-1]): out.append(out[0])\r\n    return out\r\n\r\ndef signed_centroid(points):\r\n    pts=list(points)\r\n    if len(pts)>1 and same(pts[0],pts[-1]): pts=pts[:-1]\r\n    if len(pts)<3: return 0.0,None\r\n    a2=cx=cy=zs=0.0\r\n    for i,p in enumerate(pts):\r\n        q=pts[(i+1)%len(pts)]; cross=p.X*q.Y-q.X*p.Y\r\n        a2+=cross; cx+=(p.X+q.X)*cross; cy+=(p.Y+q.Y)*cross; zs+=p.Z\r\n    a=a2/2.0\r\n    if abs(a)<1e-12: return 0.0,None\r\n    return a,XYZ(cx/(6*a),cy/(6*a),zs/len(pts))\r\n\r\ndef centroid(loops):\r\n    vals=[]\r\n    for curves in loops:\r\n        a,c=signed_centroid(loop_points(curves))\r\n        if c is not None and abs(a)>1e-12: vals.append((a,c))\r\n    if not vals: return None\r\n    total=sum(a for a,c in vals)\r\n    if abs(total)>1e-12:\r\n        return XYZ(sum(a*c.X for a,c in vals)/total,\r\n                   sum(a*c.Y for a,c in vals)/total,\r\n                   sum(abs(a)*c.Z for a,c in vals)/sum(abs(a) for a,c in vals))\r\n    return max(vals,key=lambda x:abs(x[0]))[1]\r\n\r\ndef unit_meta(d):\r\n    u=d.GetUnits()\r\n    lid=u.GetFormatOptions(SpecTypeId.Length).GetUnitTypeId()\r\n    aid=u.GetFormatOptions(SpecTypeId.Area).GetUnitTypeId()\r\n    def label(x):\r\n        try:return UnitUtils.GetTypeCatalogStringForUnit(x)\r\n        except:return str(x.TypeId)\r\n    return {\"length_unit_type_id\":str(lid.TypeId),\"length_unit_label\":label(lid),\r\n            \"area_unit_type_id\":str(aid.TypeId),\"area_unit_label\":label(aid)}\r\n\r\ndef source_meta(d):\r\n    try: cloud=bool(d.IsModelInCloud)\r\n    except:\r\n        try: cloud=d.GetCloudModelPath() is not None\r\n        except: cloud=False\r\n    visible=\"\"; central=\"\"\r\n    if cloud:\r\n        try: visible=ModelPathUtils.ConvertModelPathToUserVisiblePath(d.GetCloudModelPath())\r\n        except: visible=d.PathName or d.Title\r\n        kind=\"CLOUD_WORKSHARED\" if d.IsWorkshared else \"CLOUD\"\r\n    else:\r\n        visible=d.PathName or \"\"\r\n        kind=\"WORKSHARED\" if d.IsWorkshared else \"LOCAL\"\r\n        if d.IsWorkshared:\r\n            try: central=ModelPathUtils.ConvertModelPathToUserVisiblePath(WorksharingUtils.GetCentralModelPath(d))\r\n            except: pass\r\n    return {\"model_type\":kind,\"is_cloud_model\":cloud,\"is_workshared\":bool(d.IsWorkshared),\r\n            \"source_display_path\":visible,\"central_display_path\":central}\r\n\r\ndef room_meta(room):\r\n    out={}\r\n    try: out[\"level_id\"]=eid_int(room.LevelId)\r\n    except: out[\"level_id\"]=None\r\n    try: out[\"level_name\"]=room.Level.Name if room.Level else None\r\n    except: out[\"level_name\"]=None\r\n    try: out[\"phase_created\"]=eid_int(room.PhaseCreated) if room.PhaseCreated else None\r\n    except: out[\"phase_created\"]=None\r\n    try:\r\n        pd=room.PhaseDemolished\r\n        out[\"phase_demolished\"]=eid_int(pd) if pd is not None and eid_int(pd)>0 else None\r\n    except: out[\"phase_demolished\"]=None\r\n    try:\r\n        do=room.DesignOption\r\n        out[\"design_option\"]=eid_int(do.Id) if do is not None else None\r\n    except: out[\"design_option\"]=None\r\n    try:\r\n        ws=room.Document.GetWorksetTable().GetWorkset(room.WorksetId)\r\n        out[\"workset\"]=ws.Name if ws is not None else None\r\n    except: out[\"workset\"]=None\r\n    return out\r\n\r\ndef audit_parameters(room):\r\n    values={}\r\n    for name in AUDIT_PARAMETERS:\r\n        p=room.LookupParameter(name)\r\n        if p is None:\r\n            values[name]={\"status\":\"PARAMETER_NOT_FOUND\",\"value\":None}\r\n            continue\r\n        try:\r\n            if not p.HasValue:\r\n                values[name]={\"status\":\"NO_VALUE\",\"value\":None}\r\n                continue\r\n        except:\r\n            pass\r\n        try:\r\n            # These business parameters are expected to be text. AsString keeps\r\n            # the actual stored text, including blank strings where applicable.\r\n            v=p.AsString()\r\n            if v is None:\r\n                # Defensive fallback if a future parameter is not text based.\r\n                v=p.AsValueString()\r\n            values[name]={\"status\":\"VALUE\",\"value\":v}\r\n        except Exception as ex:\r\n            values[name]={\"status\":\"READ_ERROR\",\"value\":None,\"message\":str(ex)}\r\n    return values\r\n\r\n\r\ndef extract(d,qa):\r\n    opt=SpatialElementBoundaryOptions(); opt.SpatialElementBoundaryLocation=SpatialElementBoundaryLocation.Finish\r\n    rooms=list(FilteredElementCollector(d).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType().ToElements())\r\n    stands={}; skipped=errors=fallbacks=unplaced=unbounded=0\r\n    for room in rooms:\r\n        number=(room.Number or \"\").strip(); eid=eid_int(room.Id)\r\n        if not number:\r\n            skipped+=1; qa.append({\"severity\":\"WARNING\",\"element_id\":eid,\"stand_number\":None,\"message\":\"Room skipped because Room Number is blank.\"}); continue\r\n        if number in stands:\r\n            errors+=1; qa.append({\"severity\":\"ERROR\",\"element_id\":eid,\"stand_number\":number,\"message\":\"Duplicate Stand/Room Number; baseline would be ambiguous.\"}); continue\r\n        try:\r\n            placed=True\r\n            try: placed=bool(room.IsPlaced)\r\n            except:\r\n                try: placed=isinstance(room.Location,LocationPoint)\r\n                except: placed=False\r\n            try: segloops=room.GetBoundarySegments(opt)\r\n            except Exception:\r\n                if not placed: segloops=[]\r\n                else: raise\r\n            has_geo=segloops is not None and len(segloops)>0\r\n            meta=room_meta(room)\r\n            try: area=r(room.Area)\r\n            except: area=0.0\r\n            if not has_geo:\r\n                stands[number]={\"element_id\":eid,\"unique_id\":room.UniqueId,\"parameters\":audit_parameters(room),\r\n                    \"placement_status\":\"PLACED\" if placed else \"NOT_PLACED\",\"has_geometry\":False,\r\n                    \"area_internal_sqft\":area,\"perimeter_internal_ft\":None,\"centroid_internal_ft\":None,\r\n                    \"loop_count\":0,\"curve_count\":0,\"fallback_curve_count\":0,\"loops\":[], **meta}\r\n                if placed:\r\n                    unbounded+=1; qa.append({\"severity\":\"WARNING\",\"element_id\":eid,\"stand_number\":number,\"message\":\"Room is placed but has no boundary geometry; retained for audit.\"})\r\n                else:\r\n                    unplaced+=1; qa.append({\"severity\":\"INFO\",\"element_id\":eid,\"stand_number\":number,\"message\":\"Room retained for audit but is not placed on the plan.\"})\r\n                continue\r\n            loops=[]; curvesets=[]; perimeter=0.0; rc=0; cc=0\r\n            for li,segs in enumerate(segloops):\r\n                curves=[s.GetCurve() for s in segs]; curvesets.append(curves); items=[]; length=0.0\r\n                for c in curves:\r\n                    item=curve_json(c); items.append(item); length+=c.Length; cc+=1\r\n                    if item[\"type\"]==\"POLYLINE\": rc+=1\r\n                loops.append({\"loop_index\":li,\"curve_count\":len(items),\"length_internal_ft\":r(length),\"curves\":items}); perimeter+=length\r\n            cen=centroid(curvesets)\r\n            if cen is None and isinstance(room.Location,LocationPoint): cen=room.Location.Point\r\n            if cen is None: raise Exception(\"Could not calculate footprint centroid.\")\r\n            stands[number]={\"element_id\":eid,\"unique_id\":room.UniqueId,\"parameters\":audit_parameters(room),\r\n                \"placement_status\":\"PLACED\" if placed else \"NOT_PLACED\",\"has_geometry\":True,\r\n                \"area_internal_sqft\":area,\"perimeter_internal_ft\":r(perimeter),\"centroid_internal_ft\":jp(cen),\r\n                \"loop_count\":len(loops),\"curve_count\":cc,\"fallback_curve_count\":rc,\"loops\":loops, **meta}\r\n            fallbacks+=rc\r\n        except Exception as ex:\r\n            errors+=1; qa.append({\"severity\":\"ERROR\",\"element_id\":eid,\"stand_number\":number,\"message\":str(ex)})\r\n    return rooms,stands,skipped,errors,fallbacks,unplaced,unbounded\r\n\r\ndef write_json(path,payload):\r\n    tmp=path+\".tmp\"\r\n    try:\r\n        with open(tmp,\"w\",encoding=\"utf-8\") as f: json.dump(payload,f,indent=2,sort_keys=True,ensure_ascii=False); f.write(\"\\n\")\r\n        os.replace(tmp,path)\r\n    finally:\r\n        if os.path.exists(tmp):\r\n            try: os.remove(tmp)\r\n            except: pass\r\n\r\ndef is_central(d):\r\n    try:\r\n        cp=WorksharingUtils.GetCentralModelPath(d)\r\n        return os.path.normcase(ModelPathUtils.ConvertModelPathToUserVisiblePath(cp))==os.path.normcase(d.PathName or \"\")\r\n    except: return False\r\n\r\ndef sync_main(d):\r\n    if d.IsWorkshared:\r\n        if is_central(d):\r\n            if d.IsModified:\r\n                if getattr(d,\"IsModelInCloud\",False): d.SaveCloudModel()\r\n                else: d.Save()\r\n                return \"CENTRAL_SAVED\"\r\n            return \"CENTRAL_NO_CHANGE\"\r\n        t=TransactWithCentralOptions()\r\n        s=SynchronizeWithCentralOptions()\r\n        s.SetRelinquishOptions(RelinquishOptions(False))\r\n        s.SaveLocalAfter=True\r\n        s.Comment=\"Redraw baseline creation\"\r\n        d.SynchronizeWithCentral(t,s)\r\n        return \"SYNCED\"\r\n    if getattr(d,\"IsModelInCloud\",False):\r\n        d.SaveCloudModel(); return \"CLOUD_SAVED\"\r\n    if not d.PathName:\r\n        raise Exception(\"Save Main once before running Create Redraw.\")\r\n    d.Save()\r\n    return \"SAVED\"\r\n\r\ndef check_folder(folder,target,baseline):\r\n    others=[]; others_b=[]\r\n    for n in os.listdir(folder):\r\n        p=os.path.join(folder,n)\r\n        if not os.path.isfile(p): continue\r\n        if n.lower().endswith(\".rvt\") and not re.search(r\"\\.\\d{4}\\.rvt$\",n,re.I):\r\n            if os.path.normcase(os.path.abspath(p))!=os.path.normcase(target): others.append(n)\r\n        if n.lower().endswith(\".baseline.json\"):\r\n            if os.path.normcase(os.path.abspath(p))!=os.path.normcase(baseline): others_b.append(n)\r\n    if others: raise Exception(\"Target directory must contain no other primary RVT files: \"+\", \".join(others))\r\n    if others_b: raise Exception(\"Target directory must contain no other baseline JSON files: \"+\", \".join(others_b))\r\n\r\ndef save_temp_central_detached(d,target,qa,label):\r\n    app=d.Application\r\n    temp=os.path.join(tempfile.gettempdir(),\"redraw_\"+label+\"_\"+uuid.uuid4().hex+\".rvt\")\r\n    temp2=os.path.splitext(temp)[0]+\"_detached.rvt\"\r\n    o=SaveAsOptions(); o.OverwriteExistingFile=False; o.Compact=True\r\n    w=WorksharingSaveAsOptions(); w.SaveAsCentral=True; o.SetWorksharingOptions(w)\r\n    d.SaveAs(temp,o)\r\n    source=temp\r\n    try:\r\n        app.CopyModel(FilePath(temp),temp2,False)\r\n        source=temp2\r\n    except Exception as ex:\r\n        qa.append({\"severity\":\"WARNING\",\"element_id\":None,\"stand_number\":None,\"message\":\"Could not copy temporary central; trying to open it directly: \"+str(ex)})\r\n    opts=OpenOptions(); opts.DetachFromCentralOption=DetachFromCentralOption.DetachAndDiscardWorksets\r\n    det=None\r\n    try:\r\n        det=app.OpenDocumentFile(FilePath(source),opts)\r\n        o2=SaveAsOptions(); o2.OverwriteExistingFile=False; o2.Compact=True\r\n        det.SaveAs(target,o2)\r\n    finally:\r\n        if det is not None:\r\n            try: det.Close(False)\r\n            except: pass\r\n        if source!=temp:\r\n            try: os.remove(source)\r\n            except: pass\r\n    qa.append({\"severity\":\"WARNING\",\"element_id\":None,\"stand_number\":None,\r\n        \"message\":\"Temporary local central left open at \"+temp+\". Close it and delete it, then reopen Main.\"})\r\n    return \"DETACHED_TEMP_CENTRAL\"\r\n\r\ndef save_detached(d,target,qa):\r\n    app=d.Application\r\n    if not d.IsWorkshared:\r\n        o=SaveAsOptions(); o.OverwriteExistingFile=False; o.Compact=True\r\n        d.SaveAs(target,o)\r\n        return \"DIRECT\"\r\n    if d.IsModelInCloud:\r\n        return save_temp_central_detached(d,target,qa,\"cloud\")\r\n    try:\r\n        cp=WorksharingUtils.GetCentralModelPath(d)\r\n        opts=OpenOptions(); opts.DetachFromCentralOption=DetachFromCentralOption.DetachAndDiscardWorksets\r\n        det=app.OpenDocumentFile(cp,opts)\r\n        try:\r\n            o=SaveAsOptions(); o.OverwriteExistingFile=False; o.Compact=True\r\n            det.SaveAs(target,o)\r\n        finally:\r\n            det.Close(False)\r\n        return \"DETACHED_LOCAL\"\r\n    except Exception as ex:\r\n        qa.append({\"severity\":\"WARNING\",\"element_id\":None,\"stand_number\":None,\"message\":\"Could not open the central detached; falling back to temporary central flow: \"+str(ex)})\r\n        return save_temp_central_detached(d,target,qa,\"local\")\r\n\r\nqa=[]\r\nfolder=as_path(get_in(0))\r\nsummary={\"status\":\"FAILED\",\"source_model_type\":None,\"redraw_path\":None,\"baseline_path\":None,\r\n         \"rooms_collected\":0,\"stands_written\":0,\"rooms_skipped\":0,\"boundary_errors\":0,\r\n         \"unplaced_rooms\":0,\"unbounded_rooms\":0}\r\npending=None; target=None; baseline=None\r\ntry:\r\n    if doc is None or doc.IsFamilyDocument: raise Exception(\"Run from an open Revit project model.\")\r\n    if not folder: raise Exception(\"IN[0] must be a target Directory Path.\")\r\n    folder=os.path.abspath(folder.strip())\r\n    if not os.path.isdir(folder): raise Exception(\"Target directory does not exist: \"+folder)\r\n    title=doc.Title[:-4] if doc.Title.lower().endswith(\".rvt\") else doc.Title\r\n    target=os.path.join(folder,title+\".rvt\")\r\n    baseline=os.path.splitext(target)[0]+\".baseline.json\"\r\n    summary[\"redraw_path\"]=target; summary[\"baseline_path\"]=baseline\r\n    if os.path.exists(target) or os.path.exists(baseline): raise Exception(\"Redraw or baseline already exists; choose another directory or rename/remove the existing pair.\")\r\n    check_folder(folder,target,baseline)\r\n    summary[\"main_save_status\"]=sync_main(doc)\r\n    if doc.IsModified: raise Exception(\"Main still has unsaved changes after save/sync.\")\r\n    sm=source_meta(doc); summary[\"source_model_type\"]=sm[\"model_type\"]\r\n    rooms,stands,skipped,errors,fallbacks,unplaced,unbounded=extract(doc,qa)\r\n    summary.update({\"rooms_collected\":len(rooms),\"stands_written\":len(stands),\"rooms_skipped\":skipped,\r\n                    \"boundary_errors\":errors,\"unplaced_rooms\":unplaced,\"unbounded_rooms\":unbounded,\r\n                    \"polyline_fallback_curves\":fallbacks})\r\n    if not stands: raise Exception(\"No numbered rooms were available for the baseline.\")\r\n    if errors: raise Exception(\"Baseline extraction has errors. Resolve ERROR entries before creating Redraw.\")\r\n    bid=str(uuid.uuid4()); summary[\"baseline_id\"]=bid\r\n    info=doc.ProjectInformation\r\n    source_workshared=bool(doc.IsWorkshared)\r\n    output_type=\"LOCAL_DETACHED\" if source_workshared else \"LOCAL\"\r\n    payload={\"schema_version\":\"1.0\",\"snapshot_type\":\"REDRAW_BASELINE\",\"baseline_id\":bid,\r\n      \"created_utc\":datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(\"+00:00\",\"Z\"),\r\n      \"redraw\":{\"filename\":os.path.basename(target),\"sidecar_filename\":os.path.basename(baseline),\r\n                \"output_type\":output_type,\"is_workshared\":False,\"detached_from_central\":source_workshared},\r\n      \"source\":{\"document_title\":doc.Title,\"source_display_path\":sm[\"source_display_path\"],\"central_display_path\":sm[\"central_display_path\"],\r\n                \"model_type\":sm[\"model_type\"],\"project_name\":getattr(info,\"Name\",\"\") or \"\",\"project_number\":getattr(info,\"Number\",\"\") or \"\",\r\n                \"revit_version\":doc.Application.VersionNumber,\"is_cloud_model\":sm[\"is_cloud_model\"],\"is_workshared\":sm[\"is_workshared\"]},\r\n      \"canonical_units\":{\"system\":\"REVIT_INTERNAL\",\"length\":\"feet\",\"area\":\"square_feet\",\"coordinates\":\"feet\"},\r\n      \"project_display_units\":unit_meta(doc),\r\n      \"extraction_settings\":{\"boundary_location\":\"Finish\",\"coordinate_decimals\":DEC,\"measurement_decimals\":DEC,\r\n                \"fallback_tessellation_max_chord_internal_ft\":r(MAX_CHORD_FT),\r\n                \"audited_room_parameters\":AUDIT_PARAMETERS,\"merge_parameters\":MERGE_PARAMETERS},\r\n      \"counts\":{\"rooms_collected\":len(rooms),\"stands_written\":len(stands),\"rooms_skipped\":skipped,\r\n                \"boundary_errors\":errors,\"unplaced_rooms\":unplaced,\"unbounded_rooms\":unbounded,\r\n                \"polyline_fallback_curves\":fallbacks},\r\n      \"stands\":stands}\r\n    pending=baseline+\".pending\"\r\n    write_json(pending,payload)\r\n    summary[\"redraw_mode\"]=save_detached(doc,target,qa)\r\n    os.replace(pending,baseline); pending=None\r\n    if not os.path.isfile(target) or os.path.getsize(target)==0: raise Exception(\"Redraw RVT verification failed after SaveAs.\")\r\n    if not os.path.isfile(baseline) or os.path.getsize(baseline)==0: raise Exception(\"Baseline JSON verification failed after SaveAs.\")\r\n    summary[\"status\"]=\"SUCCESS\"\r\n    mode=summary.get(\"redraw_mode\")\r\n    if mode==\"DIRECT\":\r\n        summary[\"message\"]=\"Redraw and baseline created. The Redraw is now the active document.\"\r\n    elif mode==\"DETACHED_LOCAL\":\r\n        summary[\"message\"]=\"Detached Redraw and baseline created. Main remains the active document.\"\r\n    else:\r\n        summary[\"message\"]=\"Detached Redraw and baseline created. A temporary local central is active; close and delete it, then reopen Main.\"\r\nexcept Exception as ex:\r\n    if pending and os.path.exists(pending):\r\n        try: os.remove(pending)\r\n        except: pass\r\n    if target and os.path.exists(target):\r\n        qa.append({\"severity\":\"WARNING\",\"element_id\":None,\"stand_number\":None,\r\n            \"message\":\"A Redraw file may exist at \"+target+\"; delete the Redraw/baseline pair before retrying.\"})\r\n    qa.append({\"severity\":\"FATAL\",\"element_id\":None,\"stand_number\":None,\"message\":str(ex)})\r\nOUT=summary,qa\r\n",
+      "Engine": "PythonNet3",
+      "VariableInputPorts": true,
+      "Id": "85a5caf1d73448c39a067e3776b44474",
+      "NodeType": "PythonScriptNode",
+      "Inputs": [
+        {
+          "Id": "9fe3d154ae6e4652b4fed1e4420794d9",
+          "Name": "IN[0]",
+          "Description": "Input #0",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "db93f70b24554bf2b6796bbe20e1aa49",
+          "Name": "OUT",
+          "Description": "Result of the python script",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Runs an embedded Python script."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Watch, CoreNodeModels",
+      "WatchWidth": 1087.0,
+      "WatchHeight": 327.0,
+      "Id": "8fdc7897691a428294e419c59198c498",
+      "NodeType": "ExtensionNode",
+      "Inputs": [
+        {
+          "Id": "28ad2ea0c609497a87271a43d40d791b",
+          "Name": "",
+          "Description": "Node to show output from",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "4019c35f253545fcaf30f098947a6393",
+          "Name": "",
+          "Description": "Node output",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Visualizes a node's output"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.ZeroTouch.DSFunction, DynamoCore",
+      "Id": "8ca03d18b0164af0ad0aca81f507110f",
+      "NodeType": "FunctionNode",
+      "Inputs": [
+        {
+          "Id": "761c210c2e83488d8b70aec203333124",
+          "Name": "list",
+          "Description": "List to fetch an item from.\n\nvar[]..[]",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "87c459197b6d4fc699eff285dbfdbb87",
+          "Name": "index",
+          "Description": "Index of the item to be fetched.\n\nint",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "ae413ca9772a4c8384b7a73b4cdd4842",
+          "Name": "item",
+          "Description": "Item in the list at the given index.",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "FunctionSignature": "DSCore.List.GetItemAtIndex@var[]..[],int",
+      "Replication": "Auto",
+      "Description": "Returns an item from the given list that's located at the specified index.\n\nList.GetItemAtIndex (list: var[]..[], index: int): var[]..[]"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.CodeBlockNodeModel, DynamoCore",
+      "Id": "21a69274dd8a47ba8e4915339e7c4353",
+      "NodeType": "CodeBlockNode",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "7c1a441ffcfe44c98275a8ab1016492b",
+          "Name": "integer",
+          "Description": "0",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "2b3b48b0e65b48cb9d5a643805e7f994",
+          "Name": "integer",
+          "Description": "1",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Allows for DesignScript code to be authored directly",
+      "Code": "0;\n1;"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.ZeroTouch.DSFunction, DynamoCore",
+      "Id": "d92f4de3f370497eaa064f1bd943dd7a",
+      "NodeType": "FunctionNode",
+      "Inputs": [
+        {
+          "Id": "59fd8a04219c4766a73d5159771670d2",
+          "Name": "list",
+          "Description": "List to fetch an item from.\n\nvar[]..[]",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "10f2d4d8f3d340ae8f5b242c3ee12891",
+          "Name": "index",
+          "Description": "Index of the item to be fetched.\n\nint",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "dd256815df2c4bc488535171a7afa359",
+          "Name": "item",
+          "Description": "Item in the list at the given index.",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "FunctionSignature": "DSCore.List.GetItemAtIndex@var[]..[],int",
+      "Replication": "Auto",
+      "Description": "Returns an item from the given list that's located at the specified index.\n\nList.GetItemAtIndex (list: var[]..[], index: int): var[]..[]"
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Watch, CoreNodeModels",
+      "WatchWidth": 1168.0,
+      "WatchHeight": 875.0,
+      "Id": "4cf445661612402896cc43b76bc988c4",
+      "NodeType": "ExtensionNode",
+      "Inputs": [
+        {
+          "Id": "9f07a7b373b740dcbf31ce246f9a9235",
+          "Name": "",
+          "Description": "Node to show output from",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "8afbdfb978a6408b9640672a9a9dbf8a",
+          "Name": "",
+          "Description": "Node output",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Visualizes a node's output"
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.Directory, CoreNodeModels",
+      "Id": "36d1098c51da47f58480cec7bb68c182",
+      "NodeType": "ExtensionNode",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "0e105c60d9f544759b0310f8b4dee9e3",
+          "Name": "",
+          "Description": "Directory path",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Allows you to select a directory on the system and returns its path",
+      "HintPath": "",
+      "InputValue": ""
+    }
+  ],
+  "Connectors": [
+    {
+      "Start": "db93f70b24554bf2b6796bbe20e1aa49",
+      "End": "761c210c2e83488d8b70aec203333124",
+      "Id": "584888c81015470ea77486e7420513a3",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "db93f70b24554bf2b6796bbe20e1aa49",
+      "End": "59fd8a04219c4766a73d5159771670d2",
+      "Id": "4a4eddb6ed6c4a6cac1bc8709ceab146",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "ae413ca9772a4c8384b7a73b4cdd4842",
+      "End": "28ad2ea0c609497a87271a43d40d791b",
+      "Id": "b0e53522b9d047a9b48c4afa6df256da",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "7c1a441ffcfe44c98275a8ab1016492b",
+      "End": "87c459197b6d4fc699eff285dbfdbb87",
+      "Id": "55f635d0be98427d8854ba1c7f493df9",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "2b3b48b0e65b48cb9d5a643805e7f994",
+      "End": "10f2d4d8f3d340ae8f5b242c3ee12891",
+      "Id": "551d7a0efa9443d7bff64b166570f462",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "dd256815df2c4bc488535171a7afa359",
+      "End": "9f07a7b373b740dcbf31ce246f9a9235",
+      "Id": "3211c48d9cf5482f9d6b43eb90f759d8",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "0e105c60d9f544759b0310f8b4dee9e3",
+      "End": "9fe3d154ae6e4652b4fed1e4420794d9",
+      "Id": "07105bcbdac54ba9b26f9e9fefba035c",
+      "IsHidden": "False"
+    }
+  ],
+  "Dependencies": [],
+  "NodeLibraryDependencies": [],
+  "EnableLegacyPolyCurveBehavior": true,
+  "Thumbnail": "",
+  "GraphDocumentationURL": null,
+  "ExtensionWorkspaceData": [
+    {
+      "ExtensionGuid": "28992e1d-abb9-417f-8b1b-05e053bee670",
+      "Name": "Properties",
+      "Version": "4.0",
+      "Data": {}
+    },
+    {
+      "ExtensionGuid": "DFBD9CC0-DB40-457A-939E-8C8555555A9D",
+      "Name": "Generative Design",
+      "Version": "10.3",
+      "Data": {}
+    }
+  ],
+  "Author": "",
+  "Linting": {
+    "activeLinter": "None",
+    "activeLinterId": "7b75fb44-43fd-4631-a878-29f4d5d8399a",
+    "warningCount": 0,
+    "errorCount": 0
+  },
+  "Bindings": [],
+  "View": {
+    "Dynamo": {
+      "ScaleFactor": 1.0,
+      "HasRunWithoutCrash": true,
+      "IsVisibleInDynamoLibrary": true,
+      "Version": "4.0.2.3852",
+      "RunType": "Manual",
+      "RunPeriod": "1000"
+    },
+    "Camera": {
+      "Name": "_Background Preview",
+      "EyeX": -17.0,
+      "EyeY": 24.0,
+      "EyeZ": 50.0,
+      "LookX": 12.0,
+      "LookY": -13.0,
+      "LookZ": -58.0,
+      "UpX": 0.0,
+      "UpY": 1.0,
+      "UpZ": 0.0
+    },
+    "ConnectorPins": [],
+    "NodeViews": [
+      {
+        "Id": "85a5caf1d73448c39a067e3776b44474",
+        "Name": "Python Script",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 556.6666666666666,
+        "Y": 322.0
+      },
+      {
+        "Id": "8fdc7897691a428294e419c59198c498",
+        "Name": "Summary",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": true,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 1118.3294045405416,
+        "Y": 69.66655405793051
+      },
+      {
+        "Id": "8ca03d18b0164af0ad0aca81f507110f",
+        "Name": "List.GetItemAtIndex",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 838.6666666666665,
+        "Y": 317.33333333333326
+      },
+      {
+        "Id": "21a69274dd8a47ba8e4915339e7c4353",
+        "Name": "Code Block",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 581.3333333333333,
+        "Y": 494.0
+      },
+      {
+        "Id": "d92f4de3f370497eaa064f1bd943dd7a",
+        "Name": "List.GetItemAtIndex",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 843.9999999999998,
+        "Y": 482.66666666666663
+      },
+      {
+        "Id": "4cf445661612402896cc43b76bc988c4",
+        "Name": "QA",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": true,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 1122.0,
+        "Y": 482.0
+      },
+      {
+        "Id": "36d1098c51da47f58480cec7bb68c182",
+        "Name": "Directory Path",
+        "IsSetAsInput": true,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": -198.66666666666669,
+        "Y": 220.66666666666666
+      }
+    ],
+    "Annotations": [],
+    "X": 202.077251766281,
+    "Y": 179.5296394566806,
+    "Zoom": 0.7299282376137244
+  }
+}

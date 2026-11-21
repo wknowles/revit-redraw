@@ -1,0 +1,37 @@
+# AGENTS.md
+
+## What this repo is
+- Two numbered Dynamo graphs for Revit; run order is the filename order:
+  1. `1. Create Redraw.dyn` — saves/synchronizes the active Main, creates a detached Redraw copy, and writes a `<title>.baseline.json` sidecar.
+  2. `2. Compare and Update Redraw.dyn` — links the Redraw into Main, plans/applies parameter and geometry changes, then removes the link.
+- There is no build system, test suite, package manifest, or git repo. The real source is Python embedded in each `.dyn` JSON at `Nodes[].Code` (one `PythonScriptNode` per graph); the surrounding nodes only feed `IN` and read `OUT`.
+- Supporting docs: `CHANGELOG.md` (what changed and when), `DESIGN.md` (current flows, baseline contract, decisions, API facts), `ROADMAP.md` (limitations, deferred features, in-Revit test checklist), `PRIVACY_AUDIT.md` (pre-publish PII audit and checklist). Read these before planning new features.
+
+## Runtime constraints
+- Revit 2027, Dynamo 4.0.2, CPython3/PythonNet3. Scripts import `clr`, `RevitAPI`, `RevitServices` and use the Dynamo-injected `IN`/`OUT` globals, so they cannot run under plain Python.
+- `.dyn` files are CRLF JSON with Python stored as escaped `\r\n` strings. Preserve encoding/line endings when editing by hand; prefer editing the graph in Dynamo.
+- The Directory inputs ship blank; select the target folder in Dynamo before running either graph. This is intentional so local paths are not published.
+
+## Workflow gotchas
+- Graph 1 always saves the active Main, or synchronizes it with central when workshared, before extracting the baseline and copying. The old `Save Before Creating Redraw` boolean no longer exists.
+- Active document after graph 1: non-workshared → the new Redraw is active; local workshared → Main stays active; cloud workshared → a temporary local central is active. Close/delete that temporary central and reopen Main before graph 2.
+- Graph 1 refuses to run if the target `.rvt` or `.baseline.json` already exists; delete/rename the pair to regenerate.
+- Graph 2 requires the directory to contain exactly one primary `.rvt` (backup files matching `*.NNNN.rvt` are ignored) and exactly one `*.baseline.json`.
+- Graph 2 is a dry run when `Apply Updates` is false; the saved graph defaults it to **true**. Applied edits are one transaction named `MVP2.4B6 - Merge Redraw Updates`, so Undo is one step.
+- Graph 2 reuses/loads an existing Redraw link type when present instead of creating a duplicate, then removes the link type after verification.
+
+## Cross-script contract
+- Baseline JSON uses `schema_version: "1.0"`, `snapshot_type: "REDRAW_BASELINE"`, and `stands` keyed by Room Number. Graph 2 validates schema/snapshot, `redraw.filename`, `redraw.sidecar_filename`, `extraction_settings.boundary_location == "Finish"`, and the source project number when both sides have one.
+- Baseline coordinates/measurements are Revit internal units (feet); graph 2's tolerance and spacing inputs are metres and converted internally.
+- Graph 1 audits 9 parameters (includes `Corners`, `Stand Length`, `Stand Width`); graph 2 only compares/updates 6 (`Floorplan Hall/Pavilion/Sector`, `Obstruction Area`, `Product Code`, `Custom Area`). Keep both lists in sync only if the business rules change.
+- Baseline stands include level, phase, design-option, and workset metadata; graph 2 skips geometry moves when Main or Redraw Room levels do not match the baseline.
+- Geometry updates are deliberately narrow: existing Rooms only, `REDRAW_ONLY` changes only, Main boundary must be entirely unshared walls, and both boundaries must use the hardcoded wall types `Closed Wall - RX` / `Open Wall - RX`. Room Separation Lines are not supported. Added/removed/replaced Rooms, level mismatches, and conflicts are skipped, not fixed.
+
+## Output wiring gotcha
+- Graph 1: `OUT = (summary, qa)`; code block `0;1` maps them to Summary and QA.
+- Graph 2: `OUT = (summary, pout, gout, issues, qa)`, but only indices 0–3 are wired (`0;1;2;3`). `qa` (`OUT[4]`) is not surfaced, and the watch labels for `gout`/`issues` say "Parameter Conflicts"/"Errors" rather than geometry/issues. If you reorder `OUT`, update the code block and `List.GetItemAtIndex` nodes.
+
+## Verification without Revit
+- Validate JSON: `python3 -c "import json;json.load(open('1. Create Redraw.dyn',encoding='utf-8-sig'))"`.
+- Syntax-check embedded code by extracting `Nodes[].Code` and running `python3 -m py_compile` on it. Imports still fail at runtime; this only catches syntax errors.
+- Real verification requires opening each graph in Dynamo inside Revit with a suitable project.
