@@ -59,7 +59,7 @@ mocked pure-function tests passed. Run this checklist first:
   misnamed ("Parameter Conflicts"/"Errors").
 - **Directory inputs ship blank** — operators must select the folder on every run.
   This is intentional: local paths are not published.
-- **No git repo, no automated tests**; `.dyn` edits are hand/programmatic JSON surgery
+- **No automated tests**; `.dyn` edits are hand/programmatic JSON surgery
   (see `AGENTS.md` verification recipe). Pre-MVP2.4C backups exist only in the
   session temp folder and are ephemeral.
 - Graph 2's apply transaction is still named `MVP2.4B6 - Merge Redraw Updates`
@@ -75,8 +75,8 @@ Ordered roughly by value/effort; none are committed.
    fatal reasons are currently invisible.
 2. **In-Revit regression pass** (section 1) and then a small sample Main/Redraw pair
    checked into the repo as a manual test fixture.
-3. **Initialize git** and commit the `.dyn` files + docs; consider a pre-commit JSON
-   + `py_compile` check script (the `AGENTS.md` recipe automated).
+3. **Add a pre-commit check** for JSON validity and embedded `py_compile` (the
+   `AGENTS.md` recipe automated); the repo and initial commit already exist.
 4. **Automate cloud temp-central cleanup**: close/delete the temporary central via
    API after the detached `SaveAs`, or investigate a supported cloud→local detach
    path that avoids the temp central entirely. Needs careful Revit testing; the

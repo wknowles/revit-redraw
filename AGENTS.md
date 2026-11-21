@@ -4,7 +4,7 @@
 - Two numbered Dynamo graphs for Revit; run order is the filename order:
   1. `1. Create Redraw.dyn` — saves/synchronizes the active Main, creates a detached Redraw copy, and writes a `<title>.baseline.json` sidecar.
   2. `2. Compare and Update Redraw.dyn` — links the Redraw into Main, plans/applies parameter and geometry changes, then removes the link.
-- There is no build system, test suite, package manifest, or git repo. The real source is Python embedded in each `.dyn` JSON at `Nodes[].Code` (one `PythonScriptNode` per graph); the surrounding nodes only feed `IN` and read `OUT`.
+- There is no build system, test suite, or package manifest. The repo is under git. The real source is Python embedded in each `.dyn` JSON at `Nodes[].Code` (one `PythonScriptNode` per graph); the surrounding nodes only feed `IN` and read `OUT`.
 - Supporting docs: `CHANGELOG.md` (what changed and when), `DESIGN.md` (current flows, baseline contract, decisions, API facts), `ROADMAP.md` (limitations, deferred features, in-Revit test checklist), `PRIVACY_AUDIT.md` (pre-publish PII audit and checklist). Read these before planning new features.
 
 ## Runtime constraints
