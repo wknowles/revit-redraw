@@ -31,7 +31,7 @@ clr.AddReference('RevitAPI')
 from Autodesk.Revit.DB import (
     BuiltInCategory, BuiltInParameter, Color, CurveLoop, DirectShape, ElementId,
     Extrusion, FilteredElementCollector, GeometryCreationUtilities, GeometryObject,
-    Line, OverrideGraphicSettings, SolidOptions, SpatialElementBoundaryOptions,
+    Line, OverrideGraphicSettings, SpatialElementBoundaryOptions,
     SpatialElementBoundaryLocation, StorageType, Transaction, UV, Wall, XYZ)
 from RevitServices.Persistence import DocumentManager
 
@@ -159,6 +159,84 @@ def clear_previous_probe(doc, view):
     return removed
 
 
+def boundary_scan(doc, rooms, options, location_name):
+    """Inventory the boundary of every room at one boundary location.
+
+    Returns (per_room, tally, errors) where per_room holds
+    (number, status, [element descriptions]) for each room.
+    """
+    per_room = []
+    tally = {}
+    errors = []
+    for room in rooms:
+        number = room.Number or '?'
+        try:
+            if not room.IsPlaced:
+                per_room.append((number, 'NOT PLACED', []))
+                continue
+        except Exception as ex:
+            per_room.append((number, 'IsPlaced FAILED: %s' % ex, []))
+            continue
+        try:
+            segments = room.GetBoundarySegments(options)
+        except Exception as ex:
+            errors.append('%s: %s' % (number, ex))
+            per_room.append((number, 'GetBoundarySegments FAILED', []))
+            continue
+        if not segments:
+            per_room.append((number, 'NO BOUNDARY (placed but unbounded)', []))
+            continue
+        descriptions = []
+        for loop in segments:
+            for segment in loop:
+                try:
+                    element = doc.GetElement(segment.ElementId)
+                except Exception:
+                    element = None
+                if element is None:
+                    description = '<null element>'
+                else:
+                    try:
+                        category = element.Category
+                        description = category.Name if category is not None else '?'
+                    except Exception:
+                        description = '?'
+                    try:
+                        description += ' [%s]' % element.GetType().Name
+                    except Exception:
+                        pass
+                    if isinstance(element, Wall):
+                        description += ' WALL'
+                descriptions.append(description)
+                tally[description] = tally.get(description, 0) + 1
+        per_room.append((number, 'OK', descriptions))
+    return per_room, tally, errors
+
+
+def report_scan(location_name, per_room, tally, errors):
+    log('--- %s ---' % location_name)
+    for number, status, descriptions in per_room[:12]:
+        if descriptions:
+            counts = {}
+            for description in descriptions:
+                counts[description] = counts.get(description, 0) + 1
+            summary = ', '.join(['%s x%d' % (k, v) for k, v in sorted(counts.items())])
+            log('  room %-8s %s  (%d segments: %s)' % (number, status, len(descriptions), summary))
+        else:
+            log('  room %-8s %s' % (number, status))
+    if len(per_room) > 12:
+        log('  ... and %d more rooms' % (len(per_room) - 12))
+    if tally:
+        summary = ', '.join(['%s x%d' % (k, v) for k, v in sorted(tally.items())])
+        log('  TOTAL boundary elements: %s' % summary)
+    else:
+        log('  TOTAL boundary elements: none')
+    for message in errors[:6]:
+        log('  ERROR %s' % message)
+    if len(errors) > 6:
+        log('  ... and %d more errors' % (len(errors) - 6))
+
+
 def run():
     doc = DocumentManager.Instance.CurrentDBDocument
     if doc is None:
@@ -166,38 +244,80 @@ def run():
         return
     view = doc.ActiveView
     log('Revit %s | active view "%s" type=%s' % (doc.Application.VersionNumber, view.Name, view.ViewType))
+    log('This probe is standalone: it needs only an open model with rooms. No Redraw is required.')
     try:
         log('A1 AreGraphicsOverridesAllowed: %s' % view.AreGraphicsOverridesAllowed())
     except Exception as ex:
         log('A1 AreGraphicsOverridesAllowed FAILED: %s' % ex)
 
-    options = SpatialElementBoundaryOptions()
-    options.SpatialElementBoundaryLocation = SpatialElementBoundaryLocation.Center
-
     rooms = list(FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Rooms)
                  .WhereElementIsNotElementType().ToElements())
-    triples = []
-    for room in rooms:
-        try:
-            if not room.IsPlaced:
-                continue
-            segments = room.GetBoundarySegments(options)
-        except Exception:
-            continue
-        if not segments:
-            continue
-        for loop in segments:
-            for segment in loop:
-                try:
-                    element = doc.GetElement(segment.ElementId)
-                except Exception:
-                    continue
-                if isinstance(element, Wall):
-                    triples.append((room, segment, element))
-    log('E0 rooms=%d  wall boundary segments=%d' % (len(rooms), len(triples)))
-    if not triples:
-        log('FATAL: no placed room with a wall boundary was found.')
+    log('E0 rooms in model: %d' % len(rooms))
+    if not rooms:
+        log('FATAL: the model contains no Rooms.')
         return
+
+    # Inventory the boundaries at both locations. Center is what the Redraw
+    # contract uses; Finish is the fallback, and Room Separation Lines only
+    # support Finish.
+    scans = {}
+    options = SpatialElementBoundaryOptions()
+    options.SpatialElementBoundaryLocation = SpatialElementBoundaryLocation.Center
+    for location in (SpatialElementBoundaryLocation.Center, SpatialElementBoundaryLocation.Finish):
+        scan_options = SpatialElementBoundaryOptions()
+        scan_options.SpatialElementBoundaryLocation = location
+        name = 'Center' if location == SpatialElementBoundaryLocation.Center else 'Finish'
+        scans[name] = boundary_scan(doc, rooms, scan_options, name)
+
+    log('=== boundary inventory ===')
+    for name in ('Center', 'Finish'):
+        report_scan(name, *scans[name])
+
+    # Pick the location that produced wall-bounded rooms; prefer Center.
+    chosen = None
+    for name in ('Center', 'Finish'):
+        per_room, tally, errors = scans[name]
+        if any('WALL' in description for description in tally):
+            chosen = name
+            break
+    if chosen is None:
+        for name in ('Center', 'Finish'):
+            per_room, tally, errors = scans[name]
+            if tally:
+                chosen = name
+                break
+
+    triples = []
+    if chosen is not None:
+        log('=== selected ===')
+        log('boundary location used: %s' % chosen)
+        options = SpatialElementBoundaryOptions()
+        options.SpatialElementBoundaryLocation = (SpatialElementBoundaryLocation.Center
+                                                  if chosen == 'Center'
+                                                  else SpatialElementBoundaryLocation.Finish)
+        for room in rooms:
+            try:
+                if not room.IsPlaced:
+                    continue
+                segments = room.GetBoundarySegments(options)
+            except Exception:
+                continue
+            if not segments:
+                continue
+            for loop in segments:
+                for segment in loop:
+                    try:
+                        element = doc.GetElement(segment.ElementId)
+                    except Exception:
+                        continue
+                    if isinstance(element, Wall):
+                        triples.append((room, segment, element))
+    if triples:
+        log('wall-bounded rooms found: %d'
+            % len(set([t[0].Id.Value for t in triples])))
+    else:
+        log('NO wall-bounded rooms. The boundary is not made of Walls - see the inventory above.')
+        log('  (Room Separation Lines support only the Finish location, and are not supported by the merge.)')
 
     usage = {}
     for room, segment, wall in triples:
@@ -207,34 +327,54 @@ def run():
     log('E1 walls bounding more than one room: %d of %d' % (len(shared), len(usage)))
 
     # D: full wall curve or trimmed to the room?
-    candidates = [t for t in triples if eidv(t[2].Id) in shared]
-    if not candidates:
-        log('D  (no shared wall in this model - results below are not conclusive)')
-        candidates = triples
-    trimmed = False
-    for room, segment, wall in candidates[:4]:
+    wall = None
+    room = None
+    if triples:
+        candidates = [t for t in triples if eidv(t[2].Id) in shared]
+        if not candidates:
+            log('D  (no shared wall in this model - results below are not conclusive)')
+            candidates = triples
+        trimmed = False
+        for probe_room, segment, probe_wall in candidates[:4]:
+            try:
+                segment_length = segment.GetCurve().Length
+                wall_length = probe_wall.Location.Curve.Length
+                shorter = segment_length < wall_length - 1e-6
+                trimmed = trimmed or shorter
+                log('D  room %-8s segment len=%9.4f  wall len=%9.4f  %s'
+                    % (probe_room.Number or '?', segment_length, wall_length,
+                       'TRIMMED' if shorter else 'FULL WALL'))
+            except Exception as ex:
+                log('D  curve comparison failed: %s' % ex)
+        log('D  => boundary curves are %s'
+            % ('TRIMMED per room' if trimmed else 'FULL WALL curves'))
+        focus = candidates[0]
+        room = focus[0]
+        wall = focus[2]
         try:
-            segment_length = segment.GetCurve().Length
-            wall_length = wall.Location.Curve.Length
-            shorter = segment_length < wall_length - 1e-6
-            trimmed = trimmed or shorter
-            log('D  room %-8s segment len=%9.4f  wall len=%9.4f  %s'
-                % (room.Number or '?', segment_length, wall_length,
-                   'TRIMMED' if shorter else 'FULL WALL'))
-        except Exception as ex:
-            log('D  curve comparison failed: %s' % ex)
-    log('D  => boundary curves are %s' % ('TRIMMED per room' if trimmed else 'FULL WALL curves'))
+            wall_type = doc.GetElement(wall.GetTypeId())
+            wall_type_name = wall_type.Name if wall_type else '?'
+        except Exception:
+            wall_type_name = '?'
+        log('E2 focus: room %r (%s), wall %s, wall type %s'
+            % (room.Number, room.Name, wall.Id, wall_type_name))
+    else:
+        log('D  SKIPPED - no wall-bounded room to compare against.')
+        log('E2 SKIPPED - no wall to focus on.')
 
-    focus = candidates[0]
-    room = focus[0]
-    wall = focus[2]
-    try:
-        wall_type = doc.GetElement(wall.GetTypeId())
-        wall_type_name = wall_type.Name if wall_type else '?'
-    except Exception:
-        wall_type_name = '?'
-    log('E2 focus: room %r (%s), wall %s, wall type %s'
-        % (room.Number, room.Name, wall.Id, wall_type_name))
+    # C and E need a room with a location point, but not a wall boundary.
+    if room is None:
+        for candidate in rooms:
+            try:
+                if candidate.IsPlaced and candidate.Location is not None:
+                    room = candidate
+                    break
+            except Exception:
+                continue
+        if room is None and rooms:
+            room = rooms[0]
+        log('E2b using room %r for the C/E tests (no wall-bounded room available)'
+            % (room.Number if room is not None else None))
 
     z = 0.0
     try:
@@ -255,6 +395,8 @@ def run():
         if anchor is not None:
             attempts.append(('inside an existing room', anchor))
             attempts.append(('offset by +1000 ft', XYZ(anchor.X + 1000.0, anchor.Y + 1000.0, 0.0)))
+        if not attempts:
+            log('C/E SKIPPED - no room with a location point to work from.')
         for label, point in attempts:
             try:
                 # NewRoom takes a UV position on the level, not an XYZ.
@@ -304,23 +446,29 @@ def run():
     except Exception as ex:
         log('C/E diagnostics failed: %s' % ex)
 
-    try:
-        solid = band_solid(wall.Location.Curve, BAND_WIDTH, z)
-        log('B1 band solid built ok')
-    except Exception as ex:
-        solid = None
-        log('B1 band solid FAILED: %s' % ex)
+    solid = None
+    if wall is None:
+        log('B1 SKIPPED - no wall to build a band from.')
+    else:
+        try:
+            solid = band_solid(wall.Location.Curve, BAND_WIDTH, z)
+            log('B1 band solid built ok')
+        except Exception as ex:
+            solid = None
+            log('B1 band solid FAILED: %s' % ex)
     if solid is not None:
+        shape = None
         try:
             shape = make_direct_shape(doc, solid)
             log('B1 DirectShape created ok -> %s' % shape.Id)
         except Exception as ex:
             log('B1 DirectShape creation FAILED: %s' % ex)
-        try:
-            view.SetElementOverrides(shape.Id, blue_style())
-            log('B1 SetElementOverrides(DirectShape) ok')
-        except Exception as ex:
-            log('B1 SetElementOverrides on DirectShape FAILED: %s' % ex)
+        if shape is not None:
+            try:
+                view.SetElementOverrides(shape.Id, blue_style())
+                log('B1 SetElementOverrides(DirectShape) ok')
+            except Exception as ex:
+                log('B1 SetElementOverrides on DirectShape FAILED: %s' % ex)
         try:
             log('A2 GetCategoryOverrides ok -> %s'
                 % (view.GetCategoryOverrides(wall.Category.Id) is not None))
@@ -335,6 +483,9 @@ def run():
     # ---- optional visible test, committed ---------------------------------
     if not bool(_in(0, False)):
         log('A2/B2 visible test skipped. Set "Run Visual Test" to true to see it.')
+        return
+    if wall is None:
+        log('VISUAL SKIPPED - there is no wall in this model to highlight.')
         return
     removed = clear_previous_probe(doc, view)
     if removed:

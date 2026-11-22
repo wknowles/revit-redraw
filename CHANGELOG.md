@@ -18,6 +18,18 @@
 - The probe is safe by default: all diagnostics run inside a transaction that is
   rolled back. The optional visible test commits one transaction and is undone
   with a single Ctrl+Z; a later run also clears the previous probe elements.
+- **Probe hardened after the first run.** The first version aborted everything
+  when it found no wall-bounded room, and swallowed the reason. It now:
+  - inventories every room's boundary at **both** `Center` and `Finish` and
+    reports what the boundary is made of (Walls, Room Separation Lines, other),
+    so a model bounded by separation lines is diagnosed instead of silently
+    returning nothing;
+  - keeps going when there is no wall, so questions A, C and E still run;
+  - no longer leaves `shape` unbound when DirectShape creation fails.
+- Added `phase0/test_probe.py`, an offline harness that stubs the Revit API and
+  drives the probe through wall-bounded, non-wall-bounded and empty models. It
+  checks the probe's control flow only, not whether an API call is correct
+  against Revit.
 - Docs updated (`AGENTS.md`, `phase0/README.md`). No Revit runtime was
   available, so the four questions above are still open.
 

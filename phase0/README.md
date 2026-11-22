@@ -22,6 +22,8 @@ existing room, and whether the API calls used by the preview exist at all.
 
 1. Open a project model in Revit 2027 with **at least one placed room bounded by
    walls**. A model with shared walls gives a conclusive answer to **D**.
+   The probe is standalone: it needs **no Redraw and no baseline** — just the
+   open model.
 2. Open `Phase 0 Prototype.dyn` in Dynamo 4.0.2.
 3. Leave **Run Visual Test** off and press Run. **Nothing in the model changes** —
    every diagnostic runs inside a transaction that is rolled back.
@@ -31,6 +33,10 @@ existing room, and whether the API calls used by the preview exist at all.
    remove it. (A later run cleans up the previous one automatically.)
 
 ## Reading the log
+
+The probe starts with a **boundary inventory**: it asks every room for its
+boundary at both `Center` and `Finish`, and reports what the boundary is made
+of. This is the first thing to look at, because it explains everything after it.
 
 | Line prefix | Meaning |
 |---|---|
@@ -47,6 +53,18 @@ The `D` line is the one to look at first: compare `segment len` with `wall len`.
 If they are equal the boundary curve is the full wall. If the segment is shorter,
 Revit trims it per room and the baseline-to-wall matching has to tolerate that.
 
+### If the inventory shows no Walls
+
+`NO wall-bounded rooms. The boundary is not made of Walls` means the rooms are
+bounded by something else — most often **Room Separation Lines**, which is what
+you get when you draw a room boundary by hand instead of placing a room inside
+walls. Two consequences:
+
+- Questions **A**, **C** and **E** still run and are still valid; only **D** and
+  the visual test are skipped.
+- The merge itself only supports wall-bounded rooms, so the test model needs
+  **real walls** for **D** to be answerable.
+
 ## What to report back
 
 1. Does the wall turn **green** in the plan, and is it obvious? (**A**)
@@ -62,13 +80,18 @@ Revit trims it per room and the baseline-to-wall matching has to tolerate that.
 | `phase0_probe.py` | The probe. This is the source of truth. |
 | `build_dyn.py` | Generates `Phase 0 Prototype.dyn` from `phase0_probe.py`. |
 | `Phase 0 Prototype.dyn` | The graph the operator opens in Dynamo. Generated — do not hand-edit. |
+| `test_probe.py` | Offline harness. Stubs the Revit API and drives the probe through wall-bounded, non-wall-bounded and empty models. |
 
 After editing `phase0_probe.py`:
 
 ```
-python3 phase0/build_dyn.py            # regenerate
-python3 phase0/build_dyn.py --check    # confirm the .dyn matches
+python3 phase0/test_probe.py            # check the control flow offline
+python3 phase0/build_dyn.py             # regenerate
+python3 phase0/build_dyn.py --check     # confirm the .dyn matches
 ```
+
+`test_probe.py` can only prove that the probe's own control flow survives; it
+cannot tell you whether an API call is correct against Revit.
 
 The `.dyn` is CRLF JSON with the Python stored as escaped `\r\n`, matching the two
 workflow graphs in the repository root. `build_dyn.py --check` is the pre-commit
