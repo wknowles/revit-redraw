@@ -30,7 +30,7 @@ import clr, math, re
 clr.AddReference('RevitAPI')
 from Autodesk.Revit.DB import (
     BuiltInCategory, BuiltInParameter, Color, CurveLoop, DirectShape, ElementId,
-    Extrusion, FilteredElementCollector, GeometryCreationUtilities, GeometryObject,
+    FilteredElementCollector, GeometryCreationUtilities, GeometryObject,
     Line, LocationPoint, OverrideGraphicSettings, SpatialElementBoundaryOptions,
     SpatialElementBoundaryLocation, StorageType, Transaction, UV, Wall, XYZ)
 from RevitServices.Persistence import DocumentManager
@@ -50,10 +50,8 @@ def _in(index, default=None):
 
 
 def eidv(element_id):
-    try:
-        return int(element_id.Value)
-    except Exception:
-        return int(element_id.IntegerValue)
+    # Revit 2024+ has ElementId.Value; the old IntegerValue is gone.
+    return int(element_id.Value)
 
 
 def curves_match(first, second, tol=1e-6):
@@ -107,16 +105,13 @@ def band_solid(curve, width, z, samples=12):
     loop = CurveLoop()
     for i in range(len(ring)):
         loop.Append(Line.CreateBound(ring[i], ring[(i + 1) % len(ring)]))
-    try:
-        return GeometryCreationUtilities.CreateExtrusionGeometry([loop], XYZ(0.0, 0.0, 1.0), BAND_LIFT)
-    except Exception:
-        path = Line.CreateBound(XYZ(0.0, 0.0, z), XYZ(0.0, 0.0, z + BAND_LIFT))
-        return Extrusion.Create(loop, path, BAND_LIFT)
+    # Revit 2027 has no Extrusion.Create; CreateExtrusionGeometry is the API.
+    return GeometryCreationUtilities.CreateExtrusionGeometry([loop], XYZ(0.0, 0.0, 1.0), BAND_LIFT)
 
 
 def make_direct_shape(doc, solid):
     """Create a DirectShape in Generic Annotations, whichever API is available."""
-    category = ElementId(BuiltInCategory.OST_GenericAnnotations)
+    category = ElementId(BuiltInCategory.OST_GenericAnnotation)
     shape = None
     try:
         shape = DirectShape.CreateElement(doc, category)
@@ -159,7 +154,7 @@ def clear_previous_probe(doc, view):
     """Remove DirectShapes left by an earlier visible test and reset their wall override."""
     removed = 0
     try:
-        notes = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_GenericAnnotations) \
+        notes = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_GenericAnnotation) \
             .WhereElementIsNotElementType().ToElements()
     except Exception:
         return 0
@@ -191,13 +186,9 @@ def room_placement(room):
     """Describe how a room is placed.
 
     Revit 2027 has no Room.IsPlaced - SpatialElement exposes Area, Level,
-    LevelId, Location and Number only. Graph 1 already falls back to the
-    Location check; do the same here and say which route was used.
+    LevelId, Location and Number only. A placed room has a LocationPoint,
+    which is the check graph 1 uses.
     """
-    try:
-        return 'IsPlaced=%s' % room.IsPlaced
-    except Exception:
-        pass
     try:
         return 'located=%s' % isinstance(room.Location, LocationPoint)
     except Exception:

@@ -95,7 +95,16 @@ walls. Two consequences:
 | `phase0_probe.py` | The probe. This is the source of truth. |
 | `build_dyn.py` | Generates `Phase 0 Prototype.dyn` from `phase0_probe.py`. |
 | `Phase 0 Prototype.dyn` | The graph the operator opens in Dynamo. Generated — do not hand-edit. |
-| `test_probe.py` | Offline harness. Stubs the Revit API and drives the probe through wall-bounded, non-wall-bounded and empty models. |
+| `test_probe.py` | Offline harness. Stubs the Revit API and drives the probe through wall-bounded, non-wall-bounded, unplaced and empty models. |
+
+## Files elsewhere in the repository
+
+| File | Purpose |
+|---|---|
+| `tools/check_repo.py` | Runs every static check: CRLF JSON, embedded Python compiles, the generated graph matches its source, the probe survives its stubbed models, and the Revit API usage matches the documentation. |
+| `tools/check_api.py` | The Revit 2027 API audit on its own. |
+| `tools/build_api_index.py` | Refreshes `tools/revit_api_2027.json` from the documentation. Needs network access. |
+| `tools/revit_api_2027.json` | Cached index of the documented API, so the audit runs offline. |
 
 After editing `phase0_probe.py`:
 
@@ -103,10 +112,13 @@ After editing `phase0_probe.py`:
 python3 phase0/test_probe.py            # check the control flow offline
 python3 phase0/build_dyn.py             # regenerate
 python3 phase0/build_dyn.py --check     # confirm the .dyn matches
+python3 tools/check_repo.py             # everything
 ```
 
 `test_probe.py` can only prove that the probe's own control flow survives; it
-cannot tell you whether an API call is correct against Revit.
+cannot tell you whether an API call is correct against Revit. That is what
+`tools/check_api.py` is for — it compares every API name the repository uses
+with the Revit 2027 documentation.
 
 The `.dyn` is CRLF JSON with the Python stored as escaped `\r\n`, matching the two
 workflow graphs in the repository root. `build_dyn.py --check` is the pre-commit

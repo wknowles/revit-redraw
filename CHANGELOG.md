@@ -1,14 +1,40 @@
 # Changelog
 
-## 2026-11-22 — Phase 0 probe for the Redraw merge rebuild
+## 2026-11-22 — Revit 2027 API audit; four live bugs fixed
 
+- Added `tools/`, the repository's static checks. `python3 tools/check_repo.py`
+  runs them all:
+  - the `.dyn` files are valid CRLF JSON with compiling embedded Python;
+  - the generated phase 0 graph matches `phase0/phase0_probe.py`;
+  - the phase 0 probe survives its stubbed Revit models;
+  - **every Revit API call in the repository matches the Revit 2027
+    documentation**. `tools/revit_api_2027.json` is a cached index of the
+    documented API, refreshed with `python3 tools/build_api_index.py`.
+- The API audit found **four live bugs**, all of which failed silently because
+  the calls were wrapped in `except` blocks:
+  - **`WorksharingUtils.GetCentralModelPath(Document)` does not exist in Revit
+    2027.** Graph 1 used it three times. It now uses
+    `Document.GetWorksharingCentralModelPath()`. Before: `is_central()` always
+    returned False, the baseline recorded an empty `central_display_path`, and
+    workshared models silently fell back to the temp-central flow.
+  - **`Room.PhaseCreated` / `Room.PhaseDemolished` do not exist in Revit 2027.**
+    Graph 1 wrote `phase_created` and `phase_demolished` as always null. It now
+    uses `Element.CreatedPhaseId` / `Element.DemolishedPhaseId`.
+  - **`Room.IsPlaced` does not exist in Revit 2027.** Graph 1 was already
+    falling back to the location-point check; that fallback is now the code,
+    not an exception handler.
+  - **`ElementId.IntegerValue` was removed** in Revit 2024+. The dead fallback
+    in all three files is gone; `ElementId.Value` is used directly.
+- The phase 0 probe also used **`BuiltInCategory.OST_GenericAnnotations`**, which
+  does not exist in Revit 2027 - the category is `OST_GenericAnnotation`
+  (singular) - and **`Extrusion.Create`**, which was replaced by
+  `GeometryCreationUtilities.CreateExtrusionGeometry`.
 - Confirmed API facts from the Revit 2027 documentation and live Revit runs,
   now recorded in `DESIGN.md`:
   - **`Room.IsPlaced` does not exist in Revit 2027.** `SpatialElement` exposes
-    only `Area`, `Level`, `LevelId`, `Location` and `Number`. Graph 1 already
-    falls back to the location-point check, so it was working, but the docs
-    claimed otherwise; `DESIGN.md`/`CHANGELOG.md` now say where
-    `placement_status` really comes from.
+    only `Area`, `Level`, `LevelId`, `Location` and `Number`. Graph 1 derives
+    `placement_status` from `room.Location` being a `LocationPoint`, and
+    `has_geometry` from whether boundary segments are actually returned.
   - **Room boundary curves are NOT trimmed to the room.**
     `BoundarySegment.GetCurve()` returns the full wall location curve, and a
     wall shared by two rooms appears with the identical curve in both rooms'
@@ -21,10 +47,8 @@
   - `SpatialElement.Location` is get-only; the location point is moved with
     `Location.Move`.
   - `Document.Create.NewRoom` takes a `UV`, not an `XYZ`.
-  - `XYZ` has **no `Length` property** — use `GetLength()`; its operators are
+  - `XYZ` has **no `Length` property** - use `GetLength()`; its operators are
     not dependable from PythonNet.
-  - `GeometryCreationUtilities.CreateExtrusionGeometry(IList[CurveLoop], XYZ,
-    double)` builds the solid. There is no `CreateExtrusionSolid` in 2027.
   - `View.SetElementOverrides(ElementId, OverrideGraphicSettings)` applies a
     graphics override to a single element in a view.
   - `RevisionCloud.Create` takes the Revision id, so a revision cloud's colour

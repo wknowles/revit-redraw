@@ -231,6 +231,18 @@ still loads/removes the link.
 - `Document.Create.NewRoom(Level, UV)` — the position is a `UV`, not an `XYZ`.
   Revit **auto-numbers** a new room from the sequence, so an added stand must
   have its Number set explicitly.
+- **`WorksharingUtils.GetCentralModelPath(Document)` does not exist in Revit
+  2027.** Use `Document.GetWorksharingCentralModelPath()`, which returns the
+  central path or null, and throws `InvalidOperationException` when the
+  document is not workshared.
+- **`Room.PhaseCreated` / `Room.PhaseDemolished` do not exist in Revit 2027.**
+  Use `Element.CreatedPhaseId` / `Element.DemolishedPhaseId`.
+- **`ElementId.IntegerValue` was removed** in Revit 2024+; use `ElementId.Value`.
+- **`BuiltInCategory.OST_GenericAnnotations` does not exist** in Revit 2027 —
+  the category is `OST_GenericAnnotation` (singular).
+- **`Extrusion.Create` does not exist** in Revit 2027; build an extruded solid
+  with `GeometryCreationUtilities.CreateExtrusionGeometry(IList[CurveLoop],
+  XYZ, double)`.
 - **Room boundary curves are NOT trimmed to the room.**
   `BoundarySegment.GetCurve()` returns the **full wall location curve**, and
   for a wall shared by two rooms both rooms' segment lists carry the identical
