@@ -18,12 +18,27 @@ be written, because each one changes the design:
 Two more are answered along the way: what `Document.Create.NewRoom` does inside an
 existing room, and whether the API calls used by the preview exist at all.
 
+## Already answered
+
+| | Question | Answer |
+|---|---|---|
+| **C** | Is a Room's `Number` writable? | **Yes**, all three ways: `room.Number = '...'` (the property has a setter), `LookupParameter('Number').Set(...)` and `BuiltInParameter.ROOM_NUMBER`. Confirmed in Revit 2027. |
+| **A** | Are graphics overrides allowed in the view? | `AreGraphicsOverridesAllowed` returns **True**. Whether the wall visibly changes colour is still open. |
+| **E** | `NewRoom` inside an existing room | Succeeds. The new room picks up a boundary and Revit auto-assigns the next number in the sequence (`A05` after `A01`-`A04`). |
+
+Still open: **A** (does the wall visibly recolour), **B** (does the DirectShape
+band render) and **D** (are boundary curves trimmed). All three need a model
+with **real walls**.
+
 ## Running it
 
 1. Open a project model in Revit 2027 with **at least one placed room bounded by
    walls**. A model with shared walls gives a conclusive answer to **D**.
    The probe is standalone: it needs **no Redraw and no baseline** — just the
    open model.
+   *If the model was built by drawing room boundaries by hand, the boundary is
+   made of Room Separation Lines rather than Walls. The inventory will say so;
+   questions A, C and E still run, but D needs real walls.*
 2. Open `Phase 0 Prototype.dyn` in Dynamo 4.0.2.
 3. Leave **Run Visual Test** off and press Run. **Nothing in the model changes** —
    every diagnostic runs inside a transaction that is rolled back.

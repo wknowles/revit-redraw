@@ -31,7 +31,7 @@ clr.AddReference('RevitAPI')
 from Autodesk.Revit.DB import (
     BuiltInCategory, BuiltInParameter, Color, CurveLoop, DirectShape, ElementId,
     Extrusion, FilteredElementCollector, GeometryCreationUtilities, GeometryObject,
-    Line, OverrideGraphicSettings, SpatialElementBoundaryOptions,
+    Line, LocationPoint, OverrideGraphicSettings, SpatialElementBoundaryOptions,
     SpatialElementBoundaryLocation, StorageType, Transaction, UV, Wall, XYZ)
 from RevitServices.Persistence import DocumentManager
 
@@ -159,6 +159,23 @@ def clear_previous_probe(doc, view):
     return removed
 
 
+def room_placement(room):
+    """Describe how a room is placed.
+
+    Revit 2027 has no Room.IsPlaced - SpatialElement exposes Area, Level,
+    LevelId, Location and Number only. Graph 1 already falls back to the
+    Location check; do the same here and say which route was used.
+    """
+    try:
+        return 'IsPlaced=%s' % room.IsPlaced
+    except Exception:
+        pass
+    try:
+        return 'located=%s' % isinstance(room.Location, LocationPoint)
+    except Exception:
+        return 'located=?'
+
+
 def boundary_scan(doc, rooms, options, location_name):
     """Inventory the boundary of every room at one boundary location.
 
@@ -170,21 +187,15 @@ def boundary_scan(doc, rooms, options, location_name):
     errors = []
     for room in rooms:
         number = room.Number or '?'
-        try:
-            if not room.IsPlaced:
-                per_room.append((number, 'NOT PLACED', []))
-                continue
-        except Exception as ex:
-            per_room.append((number, 'IsPlaced FAILED: %s' % ex, []))
-            continue
+        placement = room_placement(room)
         try:
             segments = room.GetBoundarySegments(options)
         except Exception as ex:
             errors.append('%s: %s' % (number, ex))
-            per_room.append((number, 'GetBoundarySegments FAILED', []))
+            per_room.append((number, '%s, GetBoundarySegments FAILED' % placement, []))
             continue
         if not segments:
-            per_room.append((number, 'NO BOUNDARY (placed but unbounded)', []))
+            per_room.append((number, '%s, NO BOUNDARY' % placement, []))
             continue
         descriptions = []
         for loop in segments:
@@ -209,7 +220,7 @@ def boundary_scan(doc, rooms, options, location_name):
                         description += ' WALL'
                 descriptions.append(description)
                 tally[description] = tally.get(description, 0) + 1
-        per_room.append((number, 'OK', descriptions))
+        per_room.append((number, '%s, OK' % placement, descriptions))
     return per_room, tally, errors
 
 
@@ -297,8 +308,6 @@ def run():
                                                   else SpatialElementBoundaryLocation.Finish)
         for room in rooms:
             try:
-                if not room.IsPlaced:
-                    continue
                 segments = room.GetBoundarySegments(options)
             except Exception:
                 continue
@@ -366,7 +375,7 @@ def run():
     if room is None:
         for candidate in rooms:
             try:
-                if candidate.IsPlaced and candidate.Location is not None:
+                if isinstance(candidate.Location, LocationPoint):
                     room = candidate
                     break
             except Exception:
@@ -408,12 +417,8 @@ def run():
                 has_boundary = probe_room.GetBoundarySegments(options) is not None
             except Exception:
                 has_boundary = None
-            try:
-                is_placed = probe_room.IsPlaced
-            except Exception:
-                is_placed = None
-            log('E  NewRoom (%s): placed=%s hasBoundary=%s number=%r'
-                % (label, is_placed, has_boundary, probe_room.Number))
+            log('E  NewRoom (%s): %s hasBoundary=%s number=%r'
+                % (label, room_placement(probe_room), has_boundary, probe_room.Number))
             parameter = None
             try:
                 parameter = probe_room.LookupParameter('Number')
@@ -439,6 +444,11 @@ def run():
                         log('C  built-in Set failed: %s' % ex)
             except Exception as ex:
                 log('C  built-in ROOM_NUMBER lookup failed: %s' % ex)
+            try:
+                probe_room.Number = 'PHASE0-997'
+                log('C  Number property setter -> %r  => WRITABLE (property)' % probe_room.Number)
+            except Exception as ex:
+                log('C  Number property setter FAILED: %s' % ex)
             try:
                 doc.Delete(probe_room.Id)
             except Exception:

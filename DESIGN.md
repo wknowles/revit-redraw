@@ -48,7 +48,7 @@ the operator keeps their worksets/ownership.
   `area_internal_sqft` still comes from `Room.Area` (Revit's room area computation);
   loops, perimeter and centroid are centerline.
 - Every numbered Room is retained, including unplaced and placed-but-unbounded ones
-  (`placement_status` from `Room.IsPlaced`, `has_geometry` flag). Blank numbers are
+  (`placement_status` from the room's location point, `has_geometry` flag). Blank numbers are
   skipped with a warning; duplicate numbers and extraction exceptions are ERRORs and
   abort the run.
 - Per stand: `element_id`, `unique_id`, audited `parameters`, placement/geometry
@@ -210,3 +210,22 @@ still loads/removes the link.
   `ModelPathUtils.ConvertModelPathToUserVisiblePath` for comparison.
 - `ElementId.Value` (Revit 2024+) with `IntegerValue` fallback; `SpecTypeId`/
   `UnitTypeId` + `UnitUtils` for units.
+- **Revit 2027 has no `Room.IsPlaced`.** `SpatialElement` exposes only `Area`,
+  `Level`, `LevelId`, `Location` and `Number`. Graph 1 therefore derives
+  `placement_status` from `room.Location` being a `LocationPoint`, and
+  `has_geometry` from whether boundary segments are actually returned.
+- `SpatialElement.Number` has a setter, so a Room's number can be written
+  directly as well as through its parameter (both confirmed in Revit 2027).
+- `SpatialElement.Location` is get-only; a room's location point is moved with
+  `Location.Move`, not by assigning to the property.
+- `View.SetElementOverrides(ElementId, OverrideGraphicSettings)` applies a
+  graphics override to a **single element** in a view. `OverrideGraphicSettings`
+  has a parameterless constructor and a copy constructor, and can set cut,
+  projection and surface colours and patterns.
+- `DirectShape.CreateElement(Document, ElementId categoryId)` +
+  `SetShape(GeometryObject[])`; `SolidOptions.MaterialId` and
+  `Material.Color` are settable.
+- `RevisionCloud.Create(Document, View, ElementId revisionId, IList<Curve>)`
+  takes the **Revision** id, so a revision cloud's colour comes from its
+  revision and cannot be varied per cloud.
+- `Document.Create.NewRoom(Level, UV)` — the position is a `UV`, not an `XYZ`.

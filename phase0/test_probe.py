@@ -155,10 +155,11 @@ class RoomSeparationLine(Element):
 
 
 class FakeParameter(object):
-    def __init__(self, readonly=False, value=None):
+    def __init__(self, owner=None, readonly=False, value=None):
         self.IsReadOnly = readonly
         self.StorageType = 'String'
         self._value = value
+        self._owner = owner
 
     def AsString(self):
         return self._value
@@ -167,6 +168,8 @@ class FakeParameter(object):
         if self.IsReadOnly:
             raise Exception('parameter is read-only')
         self._value = value
+        if self._owner is not None:
+            self._owner.Number = value
         return True
 
 
@@ -182,18 +185,19 @@ class Level(Element):
 
 
 class FakeRoom(Element):
+    """A Room as Revit 2027 exposes it: no IsPlaced, writable Number."""
+
     def __init__(self, element_id, number, placed=True, boundary_elements=None,
                  unbounded=False, has_location=True):
         Element.__init__(self, element_id, 'Rooms', 'Room')
         self.Number = number
         self.Name = 'Room ' + str(number)
-        self.IsPlaced = placed
         self.LevelId = ElementId(1)
         self.Level = Level(0.0)
         self.Location = LocationPoint(XYZ(10.0 * element_id, 5.0, 0.0)) if has_location else None
         self._boundary_elements = boundary_elements or []
         self._unbounded = unbounded
-        self.number_parameter = FakeParameter(readonly=False, value=number)
+        self.number_parameter = FakeParameter(owner=self, readonly=False, value=number)
 
     def GetBoundarySegments(self, options):
         if self._unbounded:
@@ -392,7 +396,7 @@ def install_stubs(document):
                  'ElementId', 'Wall', 'Element', 'Category', 'BuiltInCategory', 'BuiltInParameter',
                  'StorageType', 'SpatialElementBoundaryLocation', 'SpatialElementBoundaryOptions',
                  'Color', 'GeometryObject', 'Transaction', 'OverrideGraphicSettings',
-                 'DirectShape', 'FilteredElementCollector', 'RoomSeparationLine'):
+                 'DirectShape', 'FilteredElementCollector', 'RoomSeparationLine', 'LocationPoint'):
         setattr(revit, name, globals()[name])
 
     clr = types.ModuleType('clr')
@@ -425,6 +429,15 @@ def build_document(scenario):
     """Build a fake document for one scenario."""
     if scenario == 'empty':
         return FakeDocument([])
+
+    if scenario == 'unplaced':
+        # A room with no location point and no boundary - the fallback path.
+        orphan = FakeRoom(1, 'A01', has_location=False)
+        placed = FakeRoom(2, 'A02', boundary_elements=[])
+        document = FakeDocument([orphan, placed])
+        for room in document._rooms:
+            document._elements[room.Id.Value] = room
+        return document
 
     if scenario == 'walls':
         shared = Wall(101, 20.0)
@@ -470,7 +483,7 @@ def run_scenario(scenario, visual):
 
 def main():
     failures = 0
-    for scenario in ('walls', 'nonwalls', 'empty'):
+    for scenario in ('walls', 'nonwalls', 'unplaced', 'empty'):
         for visual in (False, True):
             log = run_scenario(scenario, visual)
             crashed = any(line.startswith('PROBE CRASHED') for line in log)

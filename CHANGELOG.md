@@ -2,6 +2,23 @@
 
 ## 2026-11-22 — Phase 0 probe for the Redraw merge rebuild
 
+- Confirmed API facts from the Revit 2027 documentation and one live Revit run,
+  now recorded in `DESIGN.md`:
+  - **`Room.IsPlaced` does not exist in Revit 2027.** `SpatialElement` exposes
+    only `Area`, `Level`, `LevelId`, `Location` and `Number`. Graph 1 already
+    falls back to the location-point check, so it was working, but the docs
+    claimed otherwise; `DESIGN.md`/`CHANGELOG.md` now say where
+    `placement_status` really comes from.
+  - `SpatialElement.Number` **has a setter**, so a Room's number can be written
+    directly as well as through its parameter. Both were confirmed writable in
+    Revit 2027, which unblocks creating an added stand.
+  - `SpatialElement.Location` is get-only; a room's location point is moved
+    with `Location.Move`.
+  - `Document.Create.NewRoom` takes a `UV`, not an `XYZ`.
+  - `View.SetElementOverrides(ElementId, OverrideGraphicSettings)` applies a
+    graphics override to a single element in a view.
+  - `RevisionCloud.Create` takes the Revision id, so a revision cloud's colour
+    comes from its revision and cannot be varied per cloud.
 - Added `phase0/`, a diagnostic tool that is **not** part of the 1 → 2 workflow.
   It answers the runtime questions the Revit API documentation cannot answer
   before graph 2 is rebuilt around wall-level matching and a visual preview:
@@ -25,13 +42,15 @@
     so a model bounded by separation lines is diagnosed instead of silently
     returning nothing;
   - keeps going when there is no wall, so questions A, C and E still run;
-  - no longer leaves `shape` unbound when DirectShape creation fails.
+  - no longer leaves `shape` unbound when DirectShape creation fails;
+  - no longer relies on `Room.IsPlaced`, which does not exist in Revit 2027.
 - Added `phase0/test_probe.py`, an offline harness that stubs the Revit API and
-  drives the probe through wall-bounded, non-wall-bounded and empty models. It
-  checks the probe's control flow only, not whether an API call is correct
-  against Revit.
-- Docs updated (`AGENTS.md`, `phase0/README.md`). No Revit runtime was
-  available, so the four questions above are still open.
+  drives the probe through wall-bounded, non-wall-bounded, unplaced and empty
+  models. Its mock matches Revit 2027 (no `IsPlaced`, writable `Number`), so it
+  catches API mistakes the first version of the mock hid. It checks the
+  probe's control flow only, not whether an API call is correct against Revit.
+- Docs updated (`AGENTS.md`, `DESIGN.md`, `phase0/README.md`). Questions **A**,
+  **B** and **D** are still open - they need a model with real walls.
 
 ## 2026-11-21 — Centerline boundaries, clean names, Main-active workflow
 
@@ -96,7 +115,9 @@
   (`LOCAL` / `LOCAL_DETACHED`), `redraw.is_workshared: false`,
   `redraw.detached_from_central`; `extraction_settings.merge_parameters` (the 6 merged
   parameters); `counts.unbounded_rooms`.
-- Placement status now comes from `Room.IsPlaced`; unplaced and placed-but-unbounded
+- Placement status now comes from the room's location point (`Room.IsPlaced` does
+  not exist in Revit 2027 - `SpatialElement` exposes only `Area`, `Level`,
+  `LevelId`, `Location` and `Number`); unplaced and placed-but-unbounded
   rooms are retained for audit instead of being mislabelled; `Room.Area` reads and
   boundary extraction for unplaced rooms are failure-tolerant.
 - Preflight (before any save): valid project document, directory exists, target
