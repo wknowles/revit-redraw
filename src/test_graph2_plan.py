@@ -306,6 +306,41 @@ def test_boundary_that_is_not_walls_blocks_the_cluster():
     check(gplan[0]['status'] == 'SKIPPED', 'a boundary that is not walls should block')
 
 
+def test_wall_between_two_surviving_stands_blocks_the_cluster():
+    """Removing a wall that separates two stands which both keep a room would
+    put both rooms in one region, and Revit's answer to that is a modal
+    warning that edits the document outside the merge's transaction."""
+    shared = Curve(10, 0, 10, 10)
+    base = {'A01': stand('A01', [(10, shared), (11, Curve(0, 0, 10, 0))], 1),
+            'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    main = dict(base)
+    # the Redraw removed the wall but kept both rooms
+    redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
+              'A02': stand('A02', [(12, Curve(20, 0, 20, 10))], 2)}
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(gplan[0]['status'] == 'SKIPPED',
+          'removing a wall between two surviving stands must be skipped')
+    check('one region' in gplan[0]['reason'],
+          'the reason should say why, got %r' % gplan[0]['reason'])
+
+
+def test_wall_between_a_surviving_and_a_removed_stand_is_allowed():
+    """The same wall, but one of the two stands is deleted, so the model never
+    reaches the ambiguous state."""
+    shared = Curve(10, 0, 10, 10)
+    outer = Curve(20, 0, 20, 10)
+    base = {'A01': stand('A01', [(10, shared), (11, outer)], 1),
+            'A02': stand('A02', [(10, shared), (11, outer)], 2)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(11, outer)], 1)}
+    redraw_walls = graph2.wall_records([descriptor(11, outer)])
+    gplan, pplan, issues = plan(base, main, redraw, redraw_walls=redraw_walls)
+    check(gplan[0]['status'] == 'PLANNED',
+          'removing the wall when the other stand goes is fine, got %r'
+          % gplan[0].get('reason'))
+    check(gplan[0]['walls_deleted'] == 1, 'only the shared wall should be deleted')
+
+
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]

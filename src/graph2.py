@@ -302,7 +302,10 @@ def add_link(host,path):
         except:pass
         raise
 
-def remove_link_type(host,type_id):
+def remove_link_type(host,type_id,inside_transaction=False):
+    if inside_transaction:
+        host.Delete(type_id)
+        return True
     tx=Transaction(host,'MVP2.4B1 - Remove Redraw Link')
     try:
         tx.Start();host.Delete(type_id);tx.Commit();return True
@@ -527,6 +530,23 @@ def stand_status(base, main, redraw, tol, sp):
     if gm != 'UNCHANGED' and gr != 'UNCHANGED':
         return 'CONFLICT'
     return 'AFFECTED'
+
+
+def state_loop_points(state):
+    """The boundary of a state as plain point lists.
+
+    The Redraw's curves come from a link, and they die with it. Taking a copy
+    as plain points lets the link go inside the merge transaction, which is
+    what makes undo one step.
+    """
+    out = []
+    for loop in state.get('loops', []):
+        for curve in loop:
+            try:
+                out.append(wall_points(curve)[0])
+            except Exception:
+                pass
+    return out
 
 
 def baseline_walls(base_state):
@@ -805,6 +825,12 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
     adjacency=adjacency_from_wall_usage(usage)
     components=find_components(sorted(set(b)|set(m)|set(r)),adjacency)
 
+    # which Main stands use each Main wall
+    wall_stands={}
+    for number,state in m.items():
+        for wd in state_walls(state).values():
+            wall_stands.setdefault(wd['element_id'],set()).add(number)
+
     gplan=[];pplan=[];comp_no=0
     for comp in components:
         affected=[n for n in comp if statuses.get(n) in ('AFFECTED','ADDED','REMOVED')]
@@ -873,6 +899,16 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
         # Business rules: the boundary must be made of walls, and only the RX
         # wall types may be rebuilt.
         guard=None
+        removed_stands=[n for n in comp if statuses.get(n)=='REMOVED']
+        for wall in plan['delete']:
+            owners=wall_stands.get(wall['ref']['element_id'],set())
+            staying=sorted([n for n in owners if n not in removed_stands])
+            if len(staying)>1:
+                # The wall separates two stands that both keep a room, so
+                # removing it would put both rooms in one region.
+                guard=('The Redraw removes a wall that still separates %s, so they would '
+                       'end up in one region'%(', '.join(staying)))
+                break
         for n in affected:
             for source in (m,r):
                 st=source.get(n)
@@ -895,6 +931,7 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
             op['status']='SKIPPED';op['reason']=guard;gplan.append(op);continue
         op['_plan']=plan
         op['_level']=component_level(affected,m)
+        op['_want']={n:state_loop_points(r[n]) for n in affected if n in r and r[n].get('loops')}
         rooms=[]
         for n in affected:
             kind=statuses.get(n)
@@ -983,12 +1020,17 @@ try:
         for op in gplan:
             op.pop('_plan',None);op.pop('_rooms',None);op.pop('_level',None)
             op['status']='PLANNED';gout.append(op)
-        # Draw the visual diff so the plan can be checked on the plan.
+        # Draw the visual diff so the plan can be checked on the plan. Creating
+        # the bands and recolouring the walls both modify the document, so
+        # they need a transaction.
+        preview_tx=Transaction(doc,'Redraw Merge Preview')
         try:
+            preview_tx.Start()
             view=doc.ActiveView
             cleared=clear_preview(doc,view)
             z=preview_height(m,gplan)
             drawn,recoloured=draw_preview(doc,view,bands,recolour,z,qa)
+            preview_tx.Commit()
             preview_note=('Preview drawn: %d band(s) (%d blue, %d amber, %d red), %d wall(s) recoloured.'%(
                 drawn,
                 sum(1 for b2 in bands if b2[1]==PREVIEW_BLUE),
@@ -998,6 +1040,8 @@ try:
             if cleared:preview_note+=' Removed %d element(s) from an earlier preview.'%cleared
             qa.append(preview_note)
         except Exception as ex:
+            try:preview_tx.RollBack()
+            except Exception:pass
             preview_note='Preview could not be drawn: '+str(ex);qa.append(preview_note)
     else:
         tx=Transaction(doc,'MVP2.4B6 - Merge Redraw Updates')
@@ -1030,6 +1074,7 @@ try:
                     for action,number in op['_rooms']:
                         if action=='ADD':
                             redraw_state=r.get(number)
+                            if redraw_state is None:raise Exception('No Redraw Room for stand '+str(number))
                             values={}
                             for pn in PARAMS:
                                 pv=redraw_state.get('parameters',{}).get(pn)
@@ -1038,7 +1083,7 @@ try:
                             if level is None:raise Exception('Level not found in Main: '+str(redraw_state.get('level_name')))
                             room,params=create_room(doc,level,redraw_state,number,values)
                             written+=len(params)
-                        else:
+                        elif action=='MOVE':
                             room=m[number]['room']
                             tag_ids=room_tag_ids_in_active_view(doc,room)
                             target=move_room_to_redraw(room,r[number])
@@ -1049,6 +1094,14 @@ try:
                     op['status']='APPLIED'
                 except Exception as e:
                     op['status']='FAILED';op['reason']=str(e)
+            # The Redraw link goes inside the same transaction as the merge, so
+            # one undo takes the whole thing back.
+            try:
+                remove_link_type(doc,link_type_id,True)
+                cleanup=False
+                summary_link_removed='YES'
+            except Exception as e:
+                qa.append('LINK: could not remove the Redraw link in the merge transaction: '+str(e))
             for op in pplan:
                 p=m[op['stand']]['room'].LookupParameter(op['parameter'])
                 if p is None:op['status']='SKIPPED';op['reason']='Parameter not found in Main'
@@ -1069,16 +1122,17 @@ try:
             if op['status']=='APPLIED':
                 worst=0.0;ok=True
                 for number in op['affected']:
-                    after=fresh.get(number);want=r.get(number)
-                    if want is None:continue
+                    want=op.get('_want',{}).get(number)
+                    if not want:continue
+                    after=fresh.get(number)
                     if after is None:ok=False;break
-                    delta=bd(after['loops'],want['loops'],sp)
+                    delta=curve_distance(state_loop_points(after),want,sp)
                     if delta>worst:worst=delta
                 if ok and worst<=tol:op['status']='VERIFIED'
                 else:
                     op['status']='VERIFY_FAILED'
                     op['reason']='Main does not match the Redraw after the update'
-            op.pop('_plan',None);op.pop('_rooms',None);op.pop('_level',None)
+            op.pop('_plan',None);op.pop('_rooms',None);op.pop('_level',None);op.pop('_want',None)
             gout.append(op)
         for op in pplan:
             if op['status']=='APPLIED':
@@ -1086,7 +1140,9 @@ try:
                 op['status']='VERIFIED' if after==op['_target'] else 'VERIFY_FAILED'
                 if op['status']!='VERIFIED':op['reason']='Main value does not match Redraw after update'
             op.pop('_target',None);pout.append(op)
-    # Verification no longer needs linked model data; remove Redraw now.
+    # An apply removes the link inside the merge transaction, so one undo
+    # takes the whole merge back. A dry run has no merge, so the link is
+    # removed on its own afterwards.
     if cleanup and link_type_id is not None:
         remove_link_type(doc,link_type_id)
         cleanup=False
@@ -1131,7 +1187,8 @@ try:
              'Conflicts':sum(1 for x in issues if 'CONFLICT' in x.get('type','')),
              'Redraw link removed':summary_link_removed,
              'Preview':preview_note or 'NOT DRAWN',
-             'Undo':'ONE STEP - MVP2.4B6 - Merge Redraw Updates' if apply else 'NOT REQUIRED'}
+             'Undo':('ONE STEP - MVP2.4B6 - Merge Redraw Updates'
+                     if apply else 'NOT REQUIRED')}
 except Exception as e:
     # Put the reason in the summary as well as the QA list: the summary is the
     # watch that is always visible.

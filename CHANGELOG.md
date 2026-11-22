@@ -101,6 +101,26 @@
     new positions, so it is visible even where recolouring a wall does not
     take. It also reports how many bands it drew and how many walls it
     recoloured, and any failure, instead of counting what it planned to do.
+- Fixed the second round of live run failures:
+  - **The preview needed a transaction.** Creating the `DirectShape` bands and
+    recolouring the walls both modify the document, so the preview was refused
+    with "Attempt to modify the model outside of transaction".
+  - **A deleted stand was treated as a moved one.** The room loop fell through
+    to the "move" branch for a stand that had already been deleted, which
+    failed the cluster.
+  - **Removing a wall that separates two stands which both keep a room is now
+    refused.** That would put both rooms in one region, and Revit's answer to
+    that is a modal warning that edits the document outside the merge's
+    transaction - which is what broke the run and left the model needing two
+    undos.
+  - **Undo is one step again.** The Redraw link is now removed inside the merge
+    transaction, so undoing the merge undoes the lot. The verification compares
+    against a snapshot of the Redraw's geometry taken as plain points, so it no
+    longer needs the link to be alive.
+- `src/test_graph2_plan.py` grew to 14 tests, covering the shared wall guard
+  and the case where the wall between two stands is removed while one of them
+  is deleted.
+
 - `src/test_graph2_plan.py` grew to 12 tests, including the reported case: a
   separating wall removed in the Redraw with one of the two stands deleted.
   Two more bugs came out of it - the Redraw's wall inventory could add a wall
