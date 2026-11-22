@@ -229,3 +229,18 @@ still loads/removes the link.
   takes the **Revision** id, so a revision cloud's colour comes from its
   revision and cannot be varied per cloud.
 - `Document.Create.NewRoom(Level, UV)` — the position is a `UV`, not an `XYZ`.
+  Revit **auto-numbers** a new room from the sequence, so an added stand must
+  have its Number set explicitly.
+- **Room boundary curves are NOT trimmed to the room.**
+  `BoundarySegment.GetCurve()` returns the **full wall location curve**, and
+  for a wall shared by two rooms both rooms' segment lists carry the identical
+  curve. Confirmed in Revit 2027 on a shared wall: segment length equals wall
+  length and the endpoints match. So baseline curves can be compared with
+  Main's wall curves exactly, and a shared wall de-duplicates by curve.
+- `XYZ` has **no `Length` property** — use `GetLength()`. Its arithmetic
+  operators are not dependable from PythonNet; do the arithmetic on floats and
+  build new points with the constructor.
+- `GeometryCreationUtilities.CreateExtrusionGeometry(IList[CurveLoop], XYZ,
+  double)` builds an extruded solid. There is **no**
+  `GeometryCreationUtilities.CreateExtrusionSolid` in Revit 2027;
+  `Extrusion.Create(CurveLoop, Line, double)` is the older equivalent.

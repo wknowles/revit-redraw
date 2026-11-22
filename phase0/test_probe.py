@@ -28,26 +28,22 @@ sys.path.insert(0, HERE)
 # fake Revit API
 # --------------------------------------------------------------------------
 class XYZ(object):
+    """RevitAPI's XYZ: no Length property, no arithmetic operators.
+
+    Deliberately strict - the first version of this mock had Length and the
+    operators, which hid two real bugs in the probe.
+    """
+
     def __init__(self, x=0.0, y=0.0, z=0.0):
         self.X = float(x)
         self.Y = float(y)
         self.Z = float(z)
 
-    def __sub__(self, other):
-        return XYZ(self.X - other.X, self.Y - other.Y, self.Z - other.Z)
-
-    def __add__(self, other):
-        return XYZ(self.X + other.X, self.Y + other.Y, self.Z + other.Z)
-
-    def __mul__(self, scale):
-        return XYZ(self.X * scale, self.Y * scale, self.Z * scale)
-
-    @property
-    def Length(self):
+    def GetLength(self):
         return math.sqrt(self.X ** 2 + self.Y ** 2 + self.Z ** 2)
 
     def Normalize(self):
-        length = self.Length or 1.0
+        length = self.GetLength() or 1.0
         return XYZ(self.X / length, self.Y / length, self.Z / length)
 
 
@@ -64,7 +60,11 @@ class FakeCurve(object):
 
     @property
     def Length(self):
-        return self._a.__sub__(self._b).Length
+        return math.sqrt((self._a.X - self._b.X) ** 2 + (self._a.Y - self._b.Y) ** 2
+                         + (self._a.Z - self._b.Z) ** 2)
+
+    def GetEndPoint(self, index):
+        return self._a if index == 0 else self._b
 
     def Evaluate(self, t, normalized=False):
         return XYZ(self._a.X + (self._b.X - self._a.X) * t,
@@ -88,8 +88,14 @@ class CurveLoop(object):
 
 class GeometryCreationUtilities(object):
     @staticmethod
+    def CreateExtrusionGeometry(profiles, direction, height):
+        if not profiles:
+            raise Exception('no profile')
+        return object()
+
+    @staticmethod
     def CreateExtrusionSolid(loop, path, height):
-        raise NotImplementedError('forced fallback to Extrusion.Create')
+        raise NotImplementedError('not a Revit 2027 API - the probe must not use it')
 
 
 class Extrusion(object):

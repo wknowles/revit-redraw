@@ -2,19 +2,29 @@
 
 ## 2026-11-22 — Phase 0 probe for the Redraw merge rebuild
 
-- Confirmed API facts from the Revit 2027 documentation and one live Revit run,
+- Confirmed API facts from the Revit 2027 documentation and live Revit runs,
   now recorded in `DESIGN.md`:
   - **`Room.IsPlaced` does not exist in Revit 2027.** `SpatialElement` exposes
     only `Area`, `Level`, `LevelId`, `Location` and `Number`. Graph 1 already
     falls back to the location-point check, so it was working, but the docs
     claimed otherwise; `DESIGN.md`/`CHANGELOG.md` now say where
     `placement_status` really comes from.
+  - **Room boundary curves are NOT trimmed to the room.**
+    `BoundarySegment.GetCurve()` returns the full wall location curve, and a
+    wall shared by two rooms appears with the identical curve in both rooms'
+    segment lists. Baseline curves can therefore be compared with Main's wall
+    curves exactly, and a shared wall de-duplicates by curve.
   - `SpatialElement.Number` **has a setter**, so a Room's number can be written
     directly as well as through its parameter. Both were confirmed writable in
-    Revit 2027, which unblocks creating an added stand.
-  - `SpatialElement.Location` is get-only; a room's location point is moved
-    with `Location.Move`.
+    Revit 2027, which unblocks creating an added stand. Revit also auto-numbers
+    a new room from the sequence, so an added stand must set its Number.
+  - `SpatialElement.Location` is get-only; the location point is moved with
+    `Location.Move`.
   - `Document.Create.NewRoom` takes a `UV`, not an `XYZ`.
+  - `XYZ` has **no `Length` property** — use `GetLength()`; its operators are
+    not dependable from PythonNet.
+  - `GeometryCreationUtilities.CreateExtrusionGeometry(IList[CurveLoop], XYZ,
+    double)` builds the solid. There is no `CreateExtrusionSolid` in 2027.
   - `View.SetElementOverrides(ElementId, OverrideGraphicSettings)` applies a
     graphics override to a single element in a view.
   - `RevisionCloud.Create` takes the Revision id, so a revision cloud's colour
@@ -43,14 +53,21 @@
     returning nothing;
   - keeps going when there is no wall, so questions A, C and E still run;
   - no longer leaves `shape` unbound when DirectShape creation fails;
-  - no longer relies on `Room.IsPlaced`, which does not exist in Revit 2027.
+  - no longer relies on `Room.IsPlaced`, which does not exist in Revit 2027;
+  - builds the highlight band with plain float arithmetic, because RevitAPI's
+    `XYZ` has no `Length` property and its operators are not dependable from
+    PythonNet;
+  - uses `GeometryCreationUtilities.CreateExtrusionGeometry`, the API that
+    actually exists in Revit 2027.
 - Added `phase0/test_probe.py`, an offline harness that stubs the Revit API and
   drives the probe through wall-bounded, non-wall-bounded, unplaced and empty
-  models. Its mock matches Revit 2027 (no `IsPlaced`, writable `Number`), so it
-  catches API mistakes the first version of the mock hid. It checks the
-  probe's control flow only, not whether an API call is correct against Revit.
-- Docs updated (`AGENTS.md`, `DESIGN.md`, `phase0/README.md`). Questions **A**,
-  **B** and **D** are still open - they need a model with real walls.
+  models. Its mock matches Revit 2027 exactly - no `IsPlaced`, no `XYZ.Length`,
+  no XYZ operators, writable `Number` - because a permissive mock hid three
+  real API bugs in the probe. It checks the probe's control flow only, not
+  whether an API call is correct against Revit.
+- Docs updated (`AGENTS.md`, `DESIGN.md`, `phase0/README.md`). Questions **A**
+  and **B** are still open - they need the visible test on a model with real
+  walls.
 
 ## 2026-11-21 — Centerline boundaries, clean names, Main-active workflow
 

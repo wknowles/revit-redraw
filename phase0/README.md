@@ -23,12 +23,12 @@ existing room, and whether the API calls used by the preview exist at all.
 | | Question | Answer |
 |---|---|---|
 | **C** | Is a Room's `Number` writable? | **Yes**, all three ways: `room.Number = '...'` (the property has a setter), `LookupParameter('Number').Set(...)` and `BuiltInParameter.ROOM_NUMBER`. Confirmed in Revit 2027. |
+| **D** | Are room boundary curves trimmed to the room? | **No.** `BoundarySegment.GetCurve()` returns the **full wall location curve** — for a wall shared by two rooms both rooms carry the identical curve. Confirmed in Revit 2027: segment length equals wall length and the endpoints match. |
 | **A** | Are graphics overrides allowed in the view? | `AreGraphicsOverridesAllowed` returns **True**. Whether the wall visibly changes colour is still open. |
-| **E** | `NewRoom` inside an existing room | Succeeds. The new room picks up a boundary and Revit auto-assigns the next number in the sequence (`A05` after `A01`-`A04`). |
+| **E** | `NewRoom` inside an existing room | Succeeds. The new room picks up a boundary and Revit **auto-numbers** it from the sequence (`A05` after `A01`-`A04`). An added stand must have its Number set explicitly. |
 
-Still open: **A** (does the wall visibly recolour), **B** (does the DirectShape
-band render) and **D** (are boundary curves trimmed). All three need a model
-with **real walls**.
+Still open: **A** (does the wall visibly recolour) and **B** (does the DirectShape
+band render). Both need the visible test on a model with **real walls**.
 
 ## Running it
 

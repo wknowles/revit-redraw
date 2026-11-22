@@ -25,7 +25,7 @@ The probe picks a shared wall (one that bounds two or more rooms) so that
 question D is answered on the case that actually matters.  Nothing is written
 to the model unless IN[0] is True.
 """
-import clr, re
+import clr, math, re
 
 clr.AddReference('RevitAPI')
 from Autodesk.Revit.DB import (
@@ -56,33 +56,61 @@ def eidv(element_id):
         return int(element_id.IntegerValue)
 
 
+def curves_match(first, second, tol=1e-6):
+    """True when two curves have the same endpoints, in either direction."""
+    try:
+        a0, a1 = first.GetEndPoint(0), first.GetEndPoint(1)
+        b0, b1 = second.GetEndPoint(0), second.GetEndPoint(1)
+    except Exception:
+        return None
+
+    def same(p, q):
+        return (abs(p.X - q.X) <= tol and abs(p.Y - q.Y) <= tol
+                and abs(p.Z - q.Z) <= tol)
+
+    return ((same(a0, b0) and same(a1, b1)) or (same(a0, b1) and same(a1, b0)))
+
+
 def band_solid(curve, width, z, samples=12):
-    """A closed rectangle around a curve, extruded slightly upward."""
+    """A closed rectangle around a curve, extruded slightly upward.
+
+    All the arithmetic is plain Python on floats. RevitAPI's XYZ has no
+    Length property (use GetLength()) and its operators are not dependable
+    from PythonNet, so nothing here touches them.
+    """
     points = [curve.Evaluate(float(i) / samples, True) for i in range(samples + 1)]
+    half = width / 2.0
     left = []
     right = []
     for i, p in enumerate(points):
         if i == 0:
-            d = points[1] - points[0]
+            ax, ay = points[1].X, points[1].Y
+            bx, by = points[0].X, points[0].Y
         elif i == len(points) - 1:
-            d = points[-1] - points[-2]
+            ax, ay = points[-1].X, points[-1].Y
+            bx, by = points[-2].X, points[-2].Y
         else:
-            d = points[i + 1] - points[i - 1]
-        d = XYZ(d.X, d.Y, 0.0)
-        if d.Length < 1e-9:
-            d = XYZ(1.0, 0.0, 0.0)
-        d = d.Normalize()
-        offset = XYZ(-d.Y, d.X, 0.0) * (width / 2.0)
-        left.append(XYZ(p.X + offset.X, p.Y + offset.Y, z))
-        right.append(XYZ(p.X - offset.X, p.Y - offset.Y, z))
+            ax, ay = points[i + 1].X, points[i + 1].Y
+            bx, by = points[i - 1].X, points[i - 1].Y
+        dx = ax - bx
+        dy = ay - by
+        length = math.sqrt(dx * dx + dy * dy)
+        if length < 1e-9:
+            dx, dy = 1.0, 0.0
+        else:
+            dx, dy = dx / length, dy / length
+        offset_x = -dy * half
+        offset_y = dx * half
+        left.append(XYZ(p.X + offset_x, p.Y + offset_y, z))
+        right.append(XYZ(p.X - offset_x, p.Y - offset_y, z))
     ring = left + right[::-1]
     loop = CurveLoop()
     for i in range(len(ring)):
         loop.Append(Line.CreateBound(ring[i], ring[(i + 1) % len(ring)]))
-    path = Line.CreateBound(XYZ(0.0, 0.0, z), XYZ(0.0, 0.0, z + BAND_LIFT))
     try:
-        return GeometryCreationUtilities.CreateExtrusionSolid(loop, path, BAND_LIFT)
+        return GeometryCreationUtilities.CreateExtrusionGeometry([loop], XYZ(0.0, 0.0, 1.0), BAND_LIFT)
     except Exception:
+        path = Line.CreateBound(XYZ(0.0, 0.0, z), XYZ(0.0, 0.0, z + BAND_LIFT))
         return Extrusion.Create(loop, path, BAND_LIFT)
 
 
@@ -346,13 +374,17 @@ def run():
         trimmed = False
         for probe_room, segment, probe_wall in candidates[:4]:
             try:
-                segment_length = segment.GetCurve().Length
-                wall_length = probe_wall.Location.Curve.Length
-                shorter = segment_length < wall_length - 1e-6
-                trimmed = trimmed or shorter
-                log('D  room %-8s segment len=%9.4f  wall len=%9.4f  %s'
+                segment_curve = segment.GetCurve()
+                wall_curve = probe_wall.Location.Curve
+                segment_length = segment_curve.Length
+                wall_length = wall_curve.Length
+                match = curves_match(segment_curve, wall_curve)
+                if match is False:
+                    trimmed = True
+                verdict = 'TRIMMED' if (segment_length < wall_length - 1e-6 or match is False) else 'FULL WALL'
+                log('D  room %-8s segment len=%9.4f  wall len=%9.4f  endpoints=%s  %s'
                     % (probe_room.Number or '?', segment_length, wall_length,
-                       'TRIMMED' if shorter else 'FULL WALL'))
+                       'MATCH' if match else ('DIFFER' if match is False else '?'), verdict))
             except Exception as ex:
                 log('D  curve comparison failed: %s' % ex)
         log('D  => boundary curves are %s'
