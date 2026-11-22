@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-11-22 — Wall level merge, visual preview and audit trail
+
+- Graph 2 is rebuilt around **wall level** comparison instead of room level, so
+  a cluster of connected stands merges as one change:
+  - a Main wall that already sits where a Redraw wall sits is **kept**;
+  - a Main wall with no Redraw counterpart is **deleted**;
+  - a Redraw wall with no Main counterpart is **created**;
+  - a wall whose type, height, offset or flip changed is **rebuilt**;
+  - a wall added to Main after the Redraw was cut is **left alone**.
+- Stands the Redraw **added** are created (walls first, then the Room, then its
+  Number and the six merged parameters), and stands the Redraw **deleted** are
+  deleted. Revit auto-numbers new rooms, so an added stand's Number is set
+  explicitly.
+- The stands that share a wall are clustered, and the affected set turns out to
+  be closed over shared walls already - a shared wall that moves changes both
+  neighbours, so no separate clustering algorithm is needed.
+- `ALREADY` is now distinguished from `CONFLICT`: when Main already is what the
+  Redraw wants there is nothing to do, and that is no longer reported as a
+  conflict.
+- The business rules still hold: only `Closed Wall - RX` and `Open Wall - RX`
+  walls may be rebuilt, a boundary that is not made of walls is skipped, and
+  level mismatches are skipped.
+- **Visual preview.** A dry run now draws the difference on the plan:
+  - **blue** - the Redraw's new wall positions, as filled `DirectShape` bands;
+  - **amber** - the Main walls the merge will rebuild or delete;
+  - **red** - the Main walls Main changed itself, which are left alone.
+
+  The two Main colours recolour the existing walls with
+  `View.SetElementOverrides`, so they need no temporary geometry; only the
+  Redraw's new positions need a band. The preview is removed by the next run.
+- **Audit trail.** Every run appends to `<title>.merge-log.csv` and rewrites
+  `<title>.merge-summary.csv` next to the Redraw - flat CSV, one row per change,
+  for business users.
+- Graph 2 gained a fifth input, `Redraw Wins On Conflicts` (default false).
+  With it off, a cluster where Main and the Redraw disagree is blocked and
+  reported; with it on, the Redraw's version wins and the overwrite is recorded.
+- `src/merge_core.py` grew the component planner, and the tests grew to 25,
+  including the business case: four stands around a shared cross of walls, where
+  moving one wall must rebuild that wall once and leave the other seven alone.
+
 ## 2026-11-22 — Phase 0 answered; merge core built; four live bugs fixed
 
 - **All four Phase 0 questions are answered**, on a test model and on a live

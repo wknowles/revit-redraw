@@ -282,3 +282,94 @@ def adjacency_from_wall_usage(wall_to_stands):
                 if other != stand:
                     neighbours.add(other)
     return adjacency
+
+
+# --------------------------------------------------------------------------
+# component planning
+# --------------------------------------------------------------------------
+
+
+def same_attributes(left, right):
+    """True when two walls of the same position are the same wall.
+
+    Position is not enough: the designer may have changed the wall type, the
+    height or the offset without moving it. Those are still changes, so the
+    wall is rebuilt from the Redraw rather than left as it is.
+    """
+    return left.get('attributes') == right.get('attributes')
+
+
+def plan_component(main_walls, redraw_walls, baseline_walls, tol, spacing):
+    """Decide what happens to every wall in one component.
+
+    `main_walls`, `redraw_walls` and `baseline_walls` are lists of wall
+    records. A record needs:
+
+      'points'     the wall geometry, for matching
+      'attributes' the wall's type, height, offset and flip, for comparing
+      'ref'        the Revit object behind it, opaque to this module
+
+    The baseline walls are the walls as they stood when the Redraw was cut.
+    They are what tells Main's own edits apart from the designer's:
+
+    - a Main wall that is not in the baseline was added to Main after the
+      Redraw was cut, so it is left alone;
+    - a Redraw wall that is in the baseline but not in Main was removed from
+      Main after the Redraw was cut, so the two sides disagree about it.
+
+    Returns a dict with:
+
+      'keep'       Main walls that already are what the Redraw wants
+      'replace'    (main, redraw) pairs: same position, different wall
+      'delete'     Main walls the Redraw no longer has
+      'create'     Redraw walls Main does not have
+      'retained'   (main, reason) Main walls left alone, with the reason
+      'conflicts'  (redraw, reason) Redraw walls Main no longer has, because
+                   Main had removed them itself
+    """
+    match = match_walls(main_walls, redraw_walls, tol, spacing)
+    cell = cell_size(tol)
+    base_buckets = build_buckets(baseline_walls, cell) if baseline_walls else {}
+
+    def in_baseline(wall):
+        if not baseline_walls:
+            return False
+        return bool(find_matches(wall, baseline_walls, base_buckets, tol, spacing, cell))
+
+    keep = []
+    replace = []
+    delete = []
+    create = []
+    retained = []
+    conflicts = []
+
+    for left_index, right_index, _ in match['matched']:
+        left = main_walls[left_index]
+        right = redraw_walls[right_index]
+        if same_attributes(left, right):
+            keep.append(left)
+        else:
+            replace.append((left, right))
+
+    for index in match['only_left']:
+        wall = main_walls[index]
+        if in_baseline(wall):
+            delete.append(wall)
+        else:
+            retained.append((wall, 'added to Main after the Redraw was cut'))
+
+    for index in match['only_right']:
+        wall = redraw_walls[index]
+        if in_baseline(wall):
+            conflicts.append((wall, 'removed from Main after the Redraw was cut'))
+        else:
+            create.append(wall)
+
+    return {
+        'keep': keep,
+        'replace': replace,
+        'delete': delete,
+        'create': create,
+        'retained': retained,
+        'conflicts': conflicts,
+    }

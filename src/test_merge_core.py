@@ -212,6 +212,135 @@ def test_straight_ends_only_for_straight_walls():
 
 
 # --------------------------------------------------------------------------
+def plan(main_walls, redraw_walls, baseline_walls):
+    return core.plan_component(main_walls, redraw_walls, baseline_walls, 0.03, 0.25)
+
+
+def test_plan_unchanged_component():
+    walls = [wall(0, 0, 10, 0), wall(10, 0, 10, 10)]
+    result = plan(walls, list(walls), list(walls))
+    check(len(result['keep']) == 2, 'both walls should be kept')
+    check(result['delete'] == [] and result['create'] == [],
+          'nothing should be deleted or created')
+    check(result['conflicts'] == [] and result['retained'] == [],
+          'there should be no conflicts or retained walls')
+
+
+def test_plan_moved_wall():
+    main = [wall(0, 0, 10, 0), wall(10, 0, 10, 10)]
+    redraw = [wall(0, 0, 10, 0), wall(12, 0, 12, 10)]
+    baseline = list(main)
+    result = plan(main, redraw, baseline)
+    check(len(result['keep']) == 1, 'the unchanged wall should be kept')
+    check(len(result['delete']) == 1, 'the moved Main wall should be deleted')
+    check(len(result['create']) == 1, 'the new Redraw wall should be created')
+    check(result['conflicts'] == [], 'a plain move is not a conflict')
+
+
+def test_plan_wall_added_to_main_is_left_alone():
+    main = [wall(0, 0, 10, 0), wall(20, 0, 30, 0)]
+    redraw = [wall(0, 0, 10, 0)]
+    baseline = [wall(0, 0, 10, 0)]
+    result = plan(main, redraw, baseline)
+    check(len(result['keep']) == 1, 'the shared wall should be kept')
+    check(result['delete'] == [], "Main's own new wall must not be deleted")
+    check(len(result['retained']) == 1, "Main's own new wall should be reported")
+    check('added to Main' in result['retained'][0][1], 'the reason should say so')
+
+
+def test_plan_wall_removed_from_main_is_a_conflict():
+    main = [wall(0, 0, 10, 0)]
+    redraw = [wall(0, 0, 10, 0), wall(20, 0, 30, 0)]
+    baseline = [wall(0, 0, 10, 0), wall(20, 0, 30, 0)]
+    result = plan(main, redraw, baseline)
+    check(len(result['keep']) == 1, 'the shared wall should be kept')
+    check(len(result['conflicts']) == 1, 'the wall Main removed is a conflict')
+    check(result['create'] == [], 'a conflicted wall must not be created silently')
+
+
+def test_plan_attribute_change_replaces_the_wall():
+    main = [dict(wall(0, 0, 10, 0), attributes=('Closed Wall - RX', 10.0, 0.0, False))]
+    redraw = [dict(wall(0, 0, 10, 0), attributes=('Open Wall - RX', 10.0, 0.0, False))]
+    result = plan(main, redraw, list(main))
+    check(result['keep'] == [], 'a wall whose type changed must not be kept')
+    check(len(result['replace']) == 1, 'it should be replaced instead')
+    check(result['replace'][0][0] is main[0], 'the Main wall should be the one replaced')
+
+
+def test_plan_shared_wall_is_handled_once():
+    # one wall shared by two stands must not be deleted and recreated twice
+    shared = wall(0, 0, 10, 0)
+    main = [shared, wall(10, 0, 10, 10)]
+    redraw = [wall(0, 0, 10, 0.5), wall(10, 0, 10, 10)]
+    baseline = list(main)
+    result = plan(main, redraw, baseline)
+    check(len(result['delete']) == 1, 'the shared wall should be deleted once')
+    check(len(result['create']) == 1, 'and recreated once')
+    check(len(result['keep']) == 1, 'the other wall should be kept')
+
+
+# --------------------------------------------------------------------------
+def test_scenario_four_stands_in_a_two_by_two_cluster():
+    """The business case: four stands around a shared cross of walls.
+
+    The cross walls are shared by two stands each. Moving the middle wall of
+    the bottom row must replace that one wall and leave the rest alone.
+    """
+    #  a horizontal wall above the cluster
+    #  |        |        |
+    #  +--------+--------+   <- the cross, two walls meeting in the middle
+    #  |        |        |
+    #  +--------+--------+
+    top = wall(0, 20, 20, 20)
+    upper_left = wall(0, 10, 0, 20)
+    upper_right = wall(10, 10, 10, 20)
+    middle_left = wall(0, 10, 10, 10)
+    middle_right = wall(10, 10, 20, 10)
+    lower_left = wall(0, 0, 0, 10)
+    lower_right = wall(10, 0, 10, 10)
+    bottom = wall(0, 0, 20, 0)
+    cluster = [top, upper_left, upper_right, middle_left, middle_right,
+               lower_left, lower_right, bottom]
+
+    # the designer moves the bottom wall down by two feet
+    moved = list(cluster)
+    moved[7] = wall(0, -2, 20, -2)
+
+    result = plan(cluster, moved, list(cluster))
+    check(len(result['keep']) == 7, 'seven walls should be kept, got %d' % len(result['keep']))
+    check(len(result['delete']) == 1, 'the moved wall should be deleted once')
+    check(len(result['create']) == 1, 'and recreated once')
+    check(result['conflicts'] == [], 'moving a wall is not a conflict')
+    check(result['retained'] == [], 'nothing should be left on the side')
+
+
+def test_scenario_shared_wall_moves_with_its_neighbour():
+    """A shared wall is one wall, so moving it is one change, not two."""
+    left = wall(0, 0, 10, 0)
+    shared = wall(10, 0, 10, 10)
+    right = wall(10, 0, 20, 0)
+    main = [left, shared, right]
+    redraw = [left, wall(10, 0, 10, 12), right]
+    result = plan(main, redraw, list(main))
+    check(len(result['delete']) == 1, 'the shared wall should be deleted once')
+    check(len(result['create']) == 1, 'and recreated once')
+    check(len(result['keep']) == 2, 'the other walls should be kept')
+
+
+def test_scenario_two_stands_share_a_wall_and_only_one_changed():
+    """One stand changes; the wall they share must not be rebuilt."""
+    shared = wall(10, 0, 10, 10)
+    left = wall(0, 0, 10, 0)
+    main = [shared, left]
+    # the designer moves the left stand's outer wall
+    redraw = [shared, wall(0, -2, 10, -2)]
+    result = plan(main, redraw, list(main))
+    check(len(result['keep']) == 1, 'the shared wall should be kept')
+    check(len(result['delete']) == 1 and len(result['create']) == 1,
+          'only the moved wall should be rebuilt')
+
+
+# --------------------------------------------------------------------------
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]

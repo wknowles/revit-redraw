@@ -112,53 +112,54 @@ indices 0–3 are wired (see `AGENTS.md` output-wiring gotcha).
    files, `boundary_location` `"Center"` or `"Finish"` (returned for use by
    `collect`), `merge_parameters` equal to the graph's list when present, non-empty
    `stands`, project number match against Main's Project Information Number.
-   Mismatch → fatal; missing on either side → `IDENTITY WARNING` in `issues` (wired)
-   and `qa`.
+   Mismatch -> fatal; missing on either side -> `IDENTITY WARNING` in `issues`
+   (wired) and `qa`.
 3. **Link** (`add_link`): find existing link type by absolute external-file path;
-   `Load()` it if unloaded (outside transactions — `Load` clears undo history);
+   `Load()` it if unloaded (outside transactions - `Load` clears undo history);
    reuse an existing instance of that type, else create type+instance in one
    transaction (`MVP2.4B1 - Load Redraw`). Returns `(instance, link_type_id)`;
    cleanup always has the type id. Redraw rooms are read through
    `GetTotalTransform()` into Main coordinates.
-4. **Collect**: three-way states — baseline (`bases`, curves rebuilt from JSON),
-   Main, Redraw — at the baseline's boundary location (`Center` or legacy `Finish`).
-   Each state has parameters, boundary loops, wall descriptors
-   (type/level/height/offset/flipped/curve), centroid, room point, level id/name.
-5. **Plan** per stand present in all three:
-   - Geometry change class from baseline→Main and baseline→Redraw:
-     `UNCHANGED` / `MOVED` / `MODIFIED` / `ADDED` / `REMOVED` / `PLACEMENT_CHANGED`
-     (boundary distance = max sampled point-to-curve projection both ways).
-   - Apply geometry only when Main is `UNCHANGED` vs baseline and Redraw is
-     `MOVED`/`MODIFIED` (**REDRAW_ONLY**). Both-changed → `GEOMETRY CONFLICT`;
-     added/removed/placement-changed → skipped (out of MVP scope).
-   - **Level gate** (`level_mismatch`): skip geometry if Main level id/name differs
-     from baseline, Redraw level name differs from baseline, or Main/Redraw level
-     names differ. Parameters still merge.
-   - **Wall eligibility** (`geometry_eligibility`): Main boundary must be entirely
-     walls, each used by only this stand, of type `Closed Wall - RX` /
-     `Open Wall - RX`; Redraw boundary must be entirely walls of those same types.
-     Room Separation Lines are not supported.
-   - Parameters: three-way relation `NO_CHANGE` / `MAIN_ONLY` / `REDRAW_ONLY` /
-     `SAME_CHANGE` / `CONFLICT`; only `REDRAW_ONLY` is written, only to text
-     parameters, `NO_VALUE` maps to blank string. The 6 merged parameters:
-     `Floorplan Hall`, `Floorplan Pavilion`, `Floorplan Sector`, `Obstruction Area`,
-     `Product Code`, `Custom Area`. `Corners`, `Stand Length`, `Stand Width` are
-     audit-only; Room Name is never merged.
-6. **Apply** (one transaction `MVP2.4B6 - Merge Redraw Updates`, so Undo is one step):
-   per geometry op — delete Main boundary walls → regenerate → capture room tags in
-   the **active view** → create Redraw walls (type/height/offset/flipped copied;
-   height fallback 10 ft; non-structural) on the Main room's level → regenerate →
-   move room location point to Redraw room point/centroid → recenter captured tags
-   (`TagHeadPosition`, keeping tag Z). Then parameter sets. Per-op failures are
-   recorded, not fatal.
-7. **Verify** after commit: re-collect Main; geometry verified by boundary distance
-   ≤ tolerance, parameters by exact string equality → `VERIFIED` / `VERIFY_FAILED`.
-8. **Cleanup**: remove the Redraw link type (`MVP2.4B1 - Remove Redraw Link`) only
+4. **Collect**: three-way states - baseline (`bases`), Main, Redraw - at the
+   baseline's boundary location. Each state has parameters, boundary loops, wall
+   descriptors (type/level/height/offset/flipped/curve), centroid, room point and
+   level id and name.
+5. **Classify** every stand (`stand_status`): `UNCHANGED`, `ALREADY`, `CONFLICT`,
+   `AFFECTED`, `ADDED`, `REMOVED`, `MAIN_ONLY`, `MAIN_REMOVED`. `ALREADY` means
+   Main already is what the Redraw wants - that is not a conflict.
+6. **Cluster** the stands: two stands are neighbours when they share a wall, in
+   Main or in the Redraw (`state_wall_usage` -> `adjacency_from_wall_usage` ->
+   `find_components`). The affected set is already closed over shared walls, so a
+   cluster needs no separate algorithm.
+7. **Plan** each affected cluster (`plan_component`, in `src/merge_core.py`):
+   keep / replace / delete / create the walls, and list the room work - move the
+   location point, create an added stand, delete a removed stand. Walls that Main
+   added after the Redraw was cut are retained; walls Main removed are conflicts.
+   A cluster with a conflict is skipped unless `Redraw Wins On Conflicts` is set.
+   The RX wall type rule and the "boundary must be made of walls" rule are
+   checked here.
+8. **Preview** (dry run) or **Apply** (one transaction `MVP2.4B6 - Merge Redraw
+   Updates`, so Undo is one step): delete the walls to go, create the walls to
+   come, then create, delete and move the rooms, then the parameters. After the
+   commit, re-collect Main and verify each cluster against the Redraw.
+9. **Cleanup**: remove the Redraw link type (`MVP2.4B1 - Remove Redraw Link`) only
    after verification, because link-derived curves die with the link. Emergency
    cleanup in `finally` on any earlier failure.
+10. **Audit trail**: every run appends to `<title>.merge-log.csv` and rewrites
+    `<title>.merge-summary.csv` next to the Redraw.
 
-Dry run (`Apply Updates` false) outputs the same plans with status `PLANNED` and
-still loads/removes the link.
+### The preview
+A dry run draws the difference on the plan instead of only describing it:
+
+| Colour | What |
+|---|---|
+| Blue | the Redraw's new wall positions, as filled `DirectShape` bands |
+| Amber | the Main walls the merge will rebuild or delete |
+| Red | the Main walls Main changed itself, which are left alone |
+
+The two Main colours are drawn by recolouring the existing walls with
+`View.SetElementOverrides`, so they need no temporary geometry. Only the Redraw's
+new positions need a band. The preview is removed by the next run of the graph.
 
 ## 4. Decisions and rationale (business + technical)
 
