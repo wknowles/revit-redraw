@@ -133,6 +133,12 @@
     nothing, and the guard's message now says what to do about it.
   - `Preview: NOT DRAWN` in apply mode now reads "not drawn in apply mode".
 
+- Fixed the last live run finding: **a new stand's room was never created.**
+  The cluster failed with the reason "0", which is `str(KeyError(0))` - the
+  Redraw's parameters are a dict of status and value, and the new code read
+  them like a pair. Only the six merged parameters that have a value are
+  copied now.
+
 - Fixed the fourth round of live run findings:
   - **The QA watch was never fed.** The `List.GetItemAtIndex` that feeds the QA
     watch had its index connected but not its list, so the watch showed
@@ -153,7 +159,10 @@
     transaction. The QA also says that reloading the link clears the undo
     history from before the run.
 
-- `src/test_graph2_plan.py` grew to 16 tests, covering the shared wall guard,
+- `src/test_graph2_plan.py` grew to 17 tests, covering the shared wall guard,
+  the case where the wall between two stands is removed while one of them is
+  deleted, a stand that has no boundary left in the Redraw, the report of
+  where every stand of a skipped cluster is, and reading a stand's parameters.
   the case where the wall between two stands is removed while one of them is
   deleted, a stand that has no boundary left in the Redraw, and the report of
   where every stand of a skipped cluster is.

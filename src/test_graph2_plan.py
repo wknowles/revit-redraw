@@ -124,7 +124,7 @@ def descriptor(element_id, curve, wall_type='Closed Wall - RX'):
             'offset': 0.0, 'flipped': False, 'element_id': element_id, 'curve': curve}
 
 
-def stand(number, walls, element_id=None, level_name='Level 1'):
+def stand(number, walls, element_id=None, level_name='Level 1', parameters=None):
     """A stand. `walls` is a list of (element_id, curve) pairs."""
     descriptors = [descriptor(wall_id, curve) for wall_id, curve in walls]
     curves = [curve for _, curve in walls]
@@ -137,7 +137,7 @@ def stand(number, walls, element_id=None, level_name='Level 1'):
     return {
         'number': number,
         'element_id': element_id or 1,
-        'parameters': {},
+        'parameters': parameters if parameters is not None else {},
         'level_id': 1,
         'level_name': level_name,
         'loops': [list(curves)],
@@ -390,6 +390,36 @@ def test_skipped_cluster_reports_where_every_stand_is():
     check(len(qa) >= 2, 'every stand of the cluster should be reported, got %s' % qa)
     check(any('A02' in line and 'Redraw=' in line for line in qa),
           'the report should name the stand and say where it is, got %s' % qa)
+
+
+def test_added_stand_collects_its_parameters():
+    """A parameter is a dict of status and value. Reading it like a pair
+    raises KeyError(0), which the cluster reports as the reason "0"."""
+    from Autodesk.Revit.DB import BuiltInParameter  # noqa: F401  (stub)
+    parameters = {'Product Code': {'status': 'VALUE', 'value': 'PX-114'},
+                  'Floorplan Sector': {'status': 'NO_VALUE', 'value': None},
+                  'Floorplan Hall': {'status': 'PARAMETER_NOT_FOUND', 'value': None}}
+    base = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
+              'A05': stand('A05', [(21, Curve(20, 0, 30, 0))], 2, parameters=parameters)}
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
+    check(('ADD', 'A05') in gplan[0]['_rooms'],
+          'the new stand should be created, got %s' % gplan[0]['_rooms'])
+    # the same reading, the way the apply does it
+    values = {}
+    for name in graph2.PARAMS:
+        entry = parameters.get(name)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get('status') != 'VALUE':
+            continue
+        if entry.get('value') is None:
+            continue
+        values[name] = entry.get('value')
+    check(values == {'Product Code': 'PX-114'},
+          'only the parameter with a value should be copied, got %s' % values)
 
 
 def main():

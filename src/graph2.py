@@ -1163,8 +1163,13 @@ try:
                             if redraw_state is None:raise Exception('No Redraw Room for stand '+str(number))
                             values={}
                             for pn in PARAMS:
+                                # A parameter is a dict of status and value, not a
+                                # pair, so it has to be read by name.
                                 pv=redraw_state.get('parameters',{}).get(pn)
-                                if pv is not None and pv[0]=='VALUE':values[pn]=pv[1]
+                                if not isinstance(pv,dict):continue
+                                if pv.get('status')!='VALUE':continue
+                                if pv.get('value') is None:continue
+                                values[pn]=pv.get('value')
                             level=find_level_by_name(doc,redraw_state.get('level_name'))
                             if level is None:raise Exception('Level not found in Main: '+str(redraw_state.get('level_name')))
                             room,params=create_room(doc,level,redraw_state,number,values)
