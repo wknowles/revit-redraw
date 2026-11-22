@@ -51,6 +51,30 @@ def distance(a, b):
     return (dx * dx + dy * dy + dz * dz) ** 0.5
 
 
+def boundary_points(points, places=6):
+    """An exact, order-insensitive fingerprint of a boundary's points.
+
+    The Redraw is a copy of Main, so a stand nobody touched has exactly the
+    same boundary. Its points can therefore be compared directly, which costs
+    a few float comparisons instead of sampling every curve through the Revit
+    API. Rounded to `places` decimals: 1e-6 ft is far below the tolerance and
+    keeps float noise out of the comparison.
+    """
+    out = [(round(p[0], places), round(p[1], places), round(p[2], places))
+           for p in points]
+    out.sort()
+    return out
+
+
+def same_boundary(left, right):
+    """True when two boundaries are the same points in the same places.
+
+    This is deliberately not translation invariant: a boundary that moved is
+    a different boundary and has to be measured, not waved through.
+    """
+    return left == right
+
+
 def point_to_polyline(point, polyline):
     """Shortest distance from a point to a polyline."""
     best = None

@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-11-22 — Large-model performance, and a timing line
+
+The first run on a real event with several thousand stands took about 45
+seconds wall clock, and Revit's CPU read 6% throughout. That is not idle: the
+Revit API is single-threaded, so one saturated core is all a large model ever
+shows. The time was in graph 2's shared scan-and-plan path - slow in both a dry
+run and an apply - so the fixes are there:
+
+- **An untouched stand is no longer sampled.** The Redraw is a copy of Main, so
+  an unchanged stand has exactly the same boundary points. `merge_core.
+  boundary_points` / `same_boundary` compare those directly (rounded to 1e-6
+  ft, order-insensitive); the sampled `bd()` fallback only runs for a boundary
+  that really differs. This removed on the order of millions of
+  `Curve.Project` interop calls per run. The comparison is deliberately *not*
+  translation invariant, because a boundary that moved has to be measured.
+- **The status pass is computed once.** `plan_clusters` already computed
+  `statuses`, `usage`, `adjacency` and `components`; the main body recomputed
+  all four and used none of them. The duplicate pass is gone.
+- **The Redraw's wall buckets are built once**, not once per cluster. Building
+  them per cluster was quadratic in the number of stands.
+- **`ALREADY` is decided first** in `stand_status`, so an unchanged stand costs
+  one comparison instead of three.
+- **Lookups are cached per run**: wall types (was one full collection per
+  created wall), levels (was one per cluster and per added stand), the wall
+  types in `collect_walls` (was one `GetElement` per wall), the wall
+  descriptions shared by two neighbouring stands, and the room tag index (was
+  one full tag collection and one call per tag for every moved stand).
+- **The verification pass only reads the stands that changed**, instead of
+  every room in Main again.
+- **A regeneration is skipped when the step before it changed nothing**, so a
+  cluster that only creates walls no longer pays for three of them.
+- **QA now ends with a `Timing:` line** - one entry per phase (setup, open
+  Redraw, baseline, Main collect, Redraw collect, Redraw wall scan, plan,
+  preview/merge, audit, close) plus a total. The next slow run says where the
+  time went instead of inviting a guess.
+
+Offline: `plan_clusters` on a synthetic 3,000-stand model with 12,000 walls and
+300 changed stands now plans in ~4.4 s under the test fakes (which take the
+slow, fully sampled point path), where the per-cluster bucket rebuild alone used
+to cost ~23 s. Unit tests cover the fast path: unchanged boundaries are not
+sampled, a moved boundary still is.
+
 ## 2026-11-22 — No link, tags for added stands, and a preview that always clears
 
 The first apply run on the live model created stand A05's walls and Room, but

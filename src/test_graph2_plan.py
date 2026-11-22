@@ -448,6 +448,53 @@ def test_preview_marker_parses_the_older_format():
     check(walls == [], 'the older format does not use w=, got %r' % walls)
 
 
+def test_unchanged_stand_is_not_sampled():
+    """An untouched stand has exactly the same boundary in Main and in the
+    Redraw, so it must be recognised without sampling every curve through the
+    Revit API - that is what made a large model slow."""
+    calls = []
+    original = graph2.bd
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    graph2.bd = spy
+    try:
+        base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+        main = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+        redraw = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+        gplan, pplan, issues = plan(base, main, redraw)
+    finally:
+        graph2.bd = original
+    check(gplan == [], 'nothing should be planned, got %s' % gplan)
+    check(calls == [], 'an unchanged stand should not be sampled, got %d call(s)'
+          % len(calls))
+
+
+def test_changed_stand_is_still_measured():
+    """The fast path must not hide a real change: a moved wall is still
+    measured and still planned."""
+    moves = []
+    original = graph2.bd
+
+    def spy(*args, **kwargs):
+        moves.append(1)
+        return original(*args, **kwargs)
+
+    graph2.bd = spy
+    try:
+        base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+        main = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+        redraw = {'A': stand('A', [(11, Curve(0, 2, 10, 2))], 1)}
+        gplan, pplan, issues = plan(base, main, redraw)
+    finally:
+        graph2.bd = original
+    check(len(moves) >= 1, 'a moved boundary has to be measured')
+    check(len(gplan) == 1 and gplan[0]['walls_created'] == 1,
+          'the moved wall should still be planned, got %s' % gplan)
+
+
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]

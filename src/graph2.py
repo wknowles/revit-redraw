@@ -39,7 +39,7 @@ Scope is deliberately controlled:
 - a boundary that is not made of walls is skipped (Room Separation Lines)
 - level mismatches and conflicts are skipped, unless the Redraw wins flag is set
 """
-import clr, os, json, math, re, uuid
+import clr, os, json, math, re, time, uuid
 clr.AddReference('RevitAPI'); clr.AddReference('RevitServices')
 from Autodesk.Revit.DB import (Arc, Line, XYZ, Wall, LocationCurve, LocationPoint, BuiltInParameter,
  BuiltInCategory, FilteredElementCollector, LinkElementId, FilePath, OpenOptions,
@@ -83,6 +83,23 @@ def flat(loops):return [c for loop in loops for c in loop]
 def smp(c,sp):
     n=max(1,int(math.ceil(max(c.Length,1e-9)/sp)))
     return [c.Evaluate(float(i)/n,True) for i in range(n+1)]
+
+def state_flat(state):
+    """The boundary points of a state, in the shape merge_core compares.
+
+    Computed once per state and cached on it, so a stand that is compared
+    against the baseline, Main and the Redraw is flattened once.
+    """
+    cached=state.get('points_flat')
+    if cached is not None:return cached
+    points=[]
+    for loop in state.get('loops',[]):
+        for curve in loop:
+            try:points.extend(wall_points(curve)[0])
+            except Exception:pass
+    cached=boundary_points(points)
+    state['points_flat']=cached
+    return cached
 
 def pd(p,cs):
     v=1e99
@@ -137,7 +154,7 @@ def pvals(room):
         except:out[n]={'status':'READ_ERROR','value':None}
     return out
 
-def state(room,tr=None,d=None,boundary_location='Finish'):
+def state(room,tr=None,d=None,boundary_location='Finish',wall_cache=None):
     opt=SpatialElementBoundaryOptions()
     opt.SpatialElementBoundaryLocation=SpatialElementBoundaryLocation.Center if boundary_location=='Center' else SpatialElementBoundaryLocation.Finish
     segloops=room.GetBoundarySegments(opt)
@@ -162,7 +179,17 @@ def state(room,tr=None,d=None,boundary_location='Finish'):
             c=seg.GetCurve();curves.append(c.CreateTransformed(tr) if tr else c)
             ids.append(eidv(seg.ElementId))
             if d is not None:
-                wd=wall_desc(d,seg)
+                # A wall shared by two stands is described once and reused.
+                # The cache is only safe without a transform, because the
+                # transformed curve would be shared as well.
+                wd=None
+                if wall_cache is not None and tr is None:
+                    key=eidv(seg.ElementId)
+                    if key in wall_cache:wd=wall_cache[key]
+                    else:
+                        wd=wall_desc(d,seg);wall_cache[key]=wd
+                else:
+                    wd=wall_desc(d,seg)
                 if wd is not None:
                     if tr is not None: wd['curve']=wd['curve'].CreateTransformed(tr)
                     walls.append(wd)
@@ -171,14 +198,16 @@ def state(room,tr=None,d=None,boundary_location='Finish'):
                  'centroid':centroid(loops),'boundary_ids':ids,'wall_loops':wall_loops,'room_point':rp})
     return base
 
-def collect(d,tr,qa,label,boundary_location='Finish'):
+def collect(d,tr,qa,label,boundary_location='Finish',only=None):
     out={}
+    wall_cache={} if tr is None else None
     rooms=FilteredElementCollector(d).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType().ToElements()
     for room in rooms:
         n=(room.Number or '').strip()
         if not n:continue
+        if only is not None and n not in only:continue
         if n in out:qa.append(label+' '+n+': duplicate Room Number');continue
-        try:out[n]=state(room,tr,d,boundary_location)
+        try:out[n]=state(room,tr,d,boundary_location,wall_cache)
         except Exception as e:qa.append(label+' '+n+': '+str(e))
     return out
 
@@ -212,7 +241,17 @@ def geom(a,b,tol,sp):
     if b is None:return 'REMOVED'
     if a['placement_status']!=b['placement_status'] or a['has_geometry']!=b['has_geometry']:return 'PLACEMENT_CHANGED'
     if not a['has_geometry']:return 'UNCHANGED'
-    move=dst(a['centroid'],b['centroid']);delta=bd(a['loops'],b['loops'],sp)
+    move=dst(a['centroid'],b['centroid'])
+    # The Redraw is a copy of Main, so a stand nobody touched has exactly the
+    # same boundary points. Comparing those is a handful of float comparisons;
+    # sampling every curve through the Revit API is only needed when the
+    # boundary really differs. Empty point lists keep the old behaviour and go
+    # through the sampled comparison.
+    flat_a=state_flat(a);flat_b=state_flat(b)
+    if flat_a and flat_b and same_boundary(flat_a,flat_b):
+        delta=0.0
+    else:
+        delta=bd(a['loops'],b['loops'],sp)
     if delta<=tol:return 'UNCHANGED'
     if move>tol and delta<=move+tol:return 'MOVED'
     return 'MODIFIED'
@@ -312,8 +351,20 @@ def close_redraw(doc,rdoc,qa):
     return closed
 
 
+_WALL_TYPES={}
+
 def wall_types(host):
-    return {w.Name:w for w in FilteredElementCollector(host).OfClass(__import__('Autodesk.Revit.DB',fromlist=['WallType']).WallType).ToElements()}
+    """Every wall type in a document, collected once per run.
+
+    Creating a wall used to collect them all again for every wall, which in a
+    merge that creates thousands of walls is thousands of full collections.
+    """
+    key=id(host)
+    found=_WALL_TYPES.get(key)
+    if found is None:
+        found={w.Name:w for w in FilteredElementCollector(host).OfClass(__import__('Autodesk.Revit.DB',fromlist=['WallType']).WallType).ToElements()}
+        _WALL_TYPES[key]=found
+    return found
 
 
 def move_room_to_redraw(main_room,redraw):
@@ -326,24 +377,42 @@ def move_room_to_redraw(main_room,redraw):
     if delta.GetLength()>1e-9: loc.Move(delta)
     return target
 
-def room_tag_ids(host,room):
-    """The tags that point at a Room, in every view that has tags."""
-    ids=[]
+_ROOM_TAGS={}
+
+def room_tag_index(host):
+    """Room element id -> the ids of the tags that point at it.
+
+    Built once per run. This used to be one full tag collection - and one
+    Revit call per tag - for every moved stand, which is quadratic on a model
+    with thousands of stands and thousands of tags.
+    """
+    key=id(host)
+    index=_ROOM_TAGS.get(key)
+    if index is not None:return index
+    index={}
     try:
         tags=FilteredElementCollector(host).OfCategory(BuiltInCategory.OST_RoomTags).WhereElementIsNotElementType().ToElements()
     except Exception:
-        return ids
+        _ROOM_TAGS[key]=index
+        return index
     for tag in tags:
-        matched=False
+        room_id=None
         try:
             tagged=tag.Room
-            matched=tagged is not None and tag.Room.Id==room.Id
-        except:pass
-        if not matched:
-            try:matched=tag.TaggedLocalRoomId==room.Id
-            except:pass
-        if matched:ids.append(tag.Id)
-    return ids
+            if tagged is not None:room_id=eidv(tagged.Id)
+        except Exception:
+            room_id=None
+        if room_id is None:
+            try:room_id=eidv(tag.TaggedLocalRoomId)
+            except Exception:room_id=None
+        if room_id is not None:index.setdefault(room_id,[]).append(tag.Id)
+    _ROOM_TAGS[key]=index
+    return index
+
+def room_tag_ids(host,room):
+    """The tags that point at a Room, in every view that has tags."""
+    try:return list(room_tag_index(host).get(eidv(room.Id),()))
+    except Exception:return []
 
 def room_tag_templates(host):
     """The views that carry Room Tags, and the tag type each of them uses.
@@ -541,14 +610,27 @@ def collect_walls(doc, tr=None):
     Deleting a stand in the Redraw leaves its walls behind as orphans: they
     are still walls, they simply no longer bound a room. Without this the
     merge would think the Redraw deleted them and take them out of Main.
+
+    The wall type is resolved once per type id, not once per wall.
     """
     out = {}
     try:
         walls = FilteredElementCollector(doc).OfClass(Wall).ToElements()
     except Exception:
         return out
+    types = {}
     for wall in walls:
         try:
+            type_id = eidv(wall.GetTypeId())
+            if type_id in types:
+                type_name = types[type_id]
+            else:
+                try:
+                    wall_type = doc.GetElement(wall.GetTypeId())
+                    type_name = wall_type.Name if wall_type else None
+                except Exception:
+                    type_name = None
+                types[type_id] = type_name
             location = wall.Location
             curve = location.Curve if isinstance(location, LocationCurve) else None
             if curve is None:
@@ -565,11 +647,6 @@ def collect_walls(doc, tr=None):
                 offset = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET).AsDouble()
             except Exception:
                 pass
-            try:
-                wall_type = doc.GetElement(wall.GetTypeId())
-                type_name = wall_type.Name if wall_type else None
-            except Exception:
-                type_name = None
             out[eidv(wall.Id)] = {'type': type_name, 'type_id': None,
                                   'level_id': eidv(wall.LevelId), 'height': height,
                                   'offset': offset, 'flipped': bool(wall.Flipped),
@@ -617,14 +694,16 @@ def stand_status(base, main, redraw, tol, sp):
         # The Redraw has the room but it bounds nothing: the designer took the
         # stand out, so its room goes too.
         return 'REMOVED'
-    gm = geom(base, main, tol, sp) if base is not None else 'ADDED'
-    gr = geom(base, redraw, tol, sp) if base is not None else 'ADDED'
+    # Main first: if it already is what the Redraw wants, nothing else matters
+    # and the two baseline comparisons can be skipped.
     mr = geom(main, redraw, tol, sp)
     if mr == 'UNCHANGED':
         return 'ALREADY'
+    gm = geom(base, main, tol, sp) if base is not None else 'ADDED'
+    gr = geom(base, redraw, tol, sp) if base is not None else 'ADDED'
     if gr == 'UNCHANGED':
         return 'UNCHANGED'
-    if gm != 'UNCHANGED' and gr != 'UNCHANGED':
+    if gm != 'UNCHANGED':
         return 'CONFLICT'
     return 'AFFECTED'
 
@@ -676,14 +755,24 @@ def component_level(component, main, redraw, host):
     return None
 
 
+_LEVELS={}
+
 def find_level_by_name(host, name):
-    """The Main level with this name, or None."""
+    """The Main level with this name, or None.
+
+    The level list is collected once per run: it cannot change during a merge,
+    and it used to be collected for every cluster and every added stand.
+    """
     if not name:
         return None
-    try:
-        levels = FilteredElementCollector(host).OfClass(Level).ToElements()
-    except Exception:
-        return None
+    key=id(host)
+    levels=_LEVELS.get(key)
+    if levels is None:
+        try:
+            levels=FilteredElementCollector(host).OfClass(Level).ToElements()
+        except Exception:
+            return None
+        _LEVELS[key]=levels
     for level in levels:
         try:
             if level.Name == name:
@@ -1025,6 +1114,14 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
             wall_stands.setdefault(wd['element_id'],set()).add(number)
 
     gplan=[];pplan=[];comp_no=0
+    # The Redraw's whole wall inventory is bucketed once: the same buckets are
+    # reused for every cluster. Building them per cluster is quadratic in the
+    # number of stands.
+    if r_walls:
+        orphan_cell=cell_size(tol)
+        orphan_buckets=build_buckets(r_walls,orphan_cell)
+    else:
+        orphan_cell=cell_size(tol);orphan_buckets={}
     for comp in components:
         affected=[n for n in comp if statuses.get(n) in ('AFFECTED','ADDED','REMOVED')]
         conflicted=[n for n in comp if statuses.get(n)=='CONFLICT']
@@ -1066,10 +1163,8 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
             # Walls of the Redraw that no longer bound a room - the designer
             # deleted the stand but kept its walls - are still walls, so they
             # belong to the cluster and must not be taken out of Main.
-            cell=cell_size(tol)
-            buckets=build_buckets(r_walls,cell)
             for record in bw:
-                for index in find_matches(record,r_walls,buckets,tol,sp,cell):
+                for index in find_matches(record,r_walls,orphan_buckets,tol,sp,orphan_cell):
                     orphan=r_walls[index]
                     key=orphan['ref']['element_id']
                     if key in rw:
@@ -1150,6 +1245,21 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
 
 qa=[];pout=[];gout=[];issues=[];summary={'Status':'FAILED'}
 rdoc=None;rdoc_closed=False
+START=time.perf_counter()
+TIMING=[]
+
+def mark(label):
+    """Record a phase boundary, so the QA can say where a slow run spent its
+    time instead of the operator guessing."""
+    TIMING.append((label,time.perf_counter()-START))
+
+def timing_note():
+    if not TIMING:return 'Timing: not recorded'
+    parts=[];last=0.0
+    for label,at in TIMING:
+        parts.append('%s %.1fs'%(label,at-last));last=at
+    return 'Timing: '+' | '.join(parts)+' | total %.1fs'%(time.perf_counter()-START)
+
 try:
     if doc is None:raise Exception('No active Main document')
     folder=pv(iv(0));tol_m=float(iv(1,.01));sp_m=float(iv(2,.25))
@@ -1164,28 +1274,21 @@ try:
             raise Exception('Close the Redraw before running Compare and Update Redraw.')
     with open(side,'r',encoding='utf-8') as f:payload=json.load(f)
     loc=validate(payload,rvt,side,doc,qa,issues)
+    mark('setup')
     rdoc=open_redraw(doc,rvt)
     if rdoc is None:raise Exception('Redraw document is unavailable')
     activate_main(doc,qa)
+    mark('open Redraw')
     qa.append('The Redraw was read from its own document and is closed again at the end of '
               'the run. Main was never linked to it, so the undo history is intact and one '
               'Ctrl+Z puts Main back exactly where it was.')
     tol=UnitUtils.ConvertToInternalUnits(tol_m,UnitTypeId.Meters);sp=UnitUtils.ConvertToInternalUnits(sp_m,UnitTypeId.Meters)
-    b=bases(payload);m=collect(doc,None,qa,'Main',loc);r=collect(rdoc,None,qa,'Redraw',loc)
+    b=bases(payload);mark('baseline')
+    m=collect(doc,None,qa,'Main',loc);mark('Main collect')
+    r=collect(rdoc,None,qa,'Redraw',loc);mark('Redraw collect')
 
-    # ---- how every stand compares across baseline, Main and Redraw ----
-    statuses={}
-    for n in sorted(set(b)|set(m)|set(r)):
-        statuses[n]=stand_status(b.get(n),m.get(n),r.get(n),tol,sp)
-
-    # ---- cluster the stands: neighbours share a wall ----
-    usage={}
-    usage.update(state_wall_usage(m,'m'));usage.update(state_wall_usage(r,'r'))
-    adjacency=adjacency_from_wall_usage(usage)
-    components=find_components(sorted(set(b)|set(m)|set(r)),adjacency)
-
-    redraw_all=wall_records(list(collect_walls(rdoc,None).values()))
-    gplan,pplan=plan_clusters(b,m,r,redraw_all,tol,sp,redraw_wins,qa,issues)
+    redraw_all=wall_records(list(collect_walls(rdoc,None).values()));mark('Redraw wall scan')
+    gplan,pplan=plan_clusters(b,m,r,redraw_all,tol,sp,redraw_wins,qa,issues);mark('plan')
     # The tag types and views the model already uses, read before anything is
     # merged so a new stand's tags match what is there now.
     tag_templates=room_tag_templates(doc)
@@ -1291,14 +1394,17 @@ try:
                     for action,number in op['_rooms']:
                         if action=='DELETE':
                             doc.Delete(ElementId(m[number]['element_id']));gone+=1
-                    doc.Regenerate()
+                    # Only regenerate when the step before it changed
+                    # something: a regeneration is the most expensive call in
+                    # the loop and most clusters do not need all three.
+                    if gone:doc.Regenerate()
                     for wall in plan['delete']:doc.Delete(ElementId(wall['ref']['element_id']))
                     for wall,redraw_wall in plan['replace']:doc.Delete(ElementId(wall['ref']['element_id']))
-                    doc.Regenerate()
+                    if plan['delete'] or plan['replace']:doc.Regenerate()
                     level_id=op['_level']
                     for wall in plan['create']:create_wall(doc,level_id,wall['ref'])
                     for wall,redraw_wall in plan['replace']:create_wall(doc,level_id,redraw_wall['ref'])
-                    doc.Regenerate()
+                    if plan['create'] or plan['replace']:doc.Regenerate()
                     for action,number in op['_rooms']:
                         if action=='ADD':
                             redraw_state=r.get(number)
@@ -1364,7 +1470,8 @@ try:
             raise
         # Committing regenerates the document by itself, so there is no need
         # to regenerate here - and doing so outside a transaction is refused.
-        fresh=collect(doc,None,qa,'Verify',loc)
+        fresh=collect(doc,None,qa,'Verify',loc,
+                      only=set(n for op in gplan for n in op.get('affected',[])))
         for op in gplan:
             if op['status']=='APPLIED':
                 worst=0.0;ok=True
@@ -1390,6 +1497,7 @@ try:
     # The merge is the only transaction that edits Main, so one Ctrl+Z puts
     # Main back exactly where it was. The preview cleanup runs before it, in
     # its own transaction, so undoing the merge does not bring the bands back.
+    mark('merge' if apply else 'preview')
 
     # ---- the audit trail ----
     try:
@@ -1419,6 +1527,7 @@ try:
                     str(uuid.uuid4()))
     except Exception as ex:
         qa.append('AUDIT TRAIL: '+str(ex))
+    mark('audit')
 
     hard_fail=sum(1 for x in pout+gout if x['status'] in ('FAILED','VERIFY_FAILED'))
     summary={'Status':'SUCCESS' if hard_fail==0 else 'COMPLETED WITH ERRORS','Mode':'APPLIED' if apply else 'DRY RUN',
@@ -1449,5 +1558,7 @@ finally:
         summary['Redraw document closed']='YES' if rdoc_closed else 'NO'
     else:
         summary['Redraw document closed']='NOT OPENED'
+    mark('close')
+    qa.append(timing_note())
 
 OUT=summary,pout,gout,issues,qa

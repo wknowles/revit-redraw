@@ -341,6 +341,30 @@ def test_scenario_two_stands_share_a_wall_and_only_one_changed():
 
 
 # --------------------------------------------------------------------------
+def test_boundary_points_is_order_insensitive():
+    a = core.boundary_points([(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)])
+    b = core.boundary_points([(10.0, 0.0, 0.0), (0.0, 0.0, 0.0)])
+    check(a == b, 'the same points in another order are the same boundary')
+
+
+def test_same_boundary_tolerates_float_noise_only():
+    a = core.boundary_points([(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)])
+    noisy = core.boundary_points([(0.0, 0.0, 0.0), (10.0 + 1e-9, 0.0, 0.0)])
+    check(core.same_boundary(a, noisy),
+          'sub-micrometre float noise must not count as a change')
+    moved = core.boundary_points([(0.0, 0.5, 0.0), (10.0, 0.5, 0.0)])
+    check(not core.same_boundary(a, moved),
+          'a boundary that moved is a different boundary')
+
+
+def test_same_boundary_detects_extra_points():
+    a = core.boundary_points([(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)])
+    split = core.boundary_points([(0.0, 0.0, 0.0), (5.0, 0.0, 0.0), (10.0, 0.0, 0.0)])
+    check(not core.same_boundary(a, split),
+          'a different set of points has to be measured, not waved through')
+
+
+# --------------------------------------------------------------------------
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]
