@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-11-22 — `View` import, and a check for the bug class
+
+The QA after the first successful apply read `PREVIEW: could not sweep the views
+for leftovers (name 'View' is not defined)`. The cleanup's second pass calls
+`FilteredElementCollector(host).OfClass(View)`, but `View` was never imported:
+the old code only ever used `doc.ActiveView`, never the type name. The pass was
+wrapped in `try/except` so the run continued, and the QA line was the only sign.
+
+- **`View` is imported.** The sweep now runs, so walls left painted in a preview
+  colour are reset, and a band with no marker at all is still found.
+- **`tools/check_api.py` gained a fourth check**: a Revit type used as a bare
+  name (`OfClass(View)`, `isinstance(x, Wall)`) must be imported or defined in
+  the source. It audits with the AST, so a name bound anywhere counts, and it
+  only fires for names in the API index. It reports this exact bug on the graph
+  as it was before the fix, and nothing on the fixed graph. Checks 1-3 could not
+  see it: they only audit `Type.Member` accesses on *imported* types.
+
 ## 2026-11-22 — Large-model performance, and a timing line
 
 The first run on a real event with several thousand stands took about 45

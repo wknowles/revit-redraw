@@ -3,7 +3,7 @@
 
     python3 tools/check_api.py
 
-Three checks:
+Four checks:
 
   1. Every Autodesk.Revit type the repository imports must exist in the API.
   2. Every ``Type.Member`` access, where Type is an imported Revit type, must
@@ -11,6 +11,11 @@ Three checks:
   3. Every other ``.Member`` access whose name is PascalCase must correspond to
      some documented Revit member. This is a heuristic - it cannot tell which
      type a variable holds - so it is reported as a warning.
+  4. Every Revit type used as a bare name - ``OfClass(View)``,
+     ``isinstance(x, Wall)`` - must be imported or defined in the source. This
+     is exact, and it catches the one mistake checks 1-3 cannot see: a Revit
+     type used without its import, which fails at run time with
+     ``NameError: name 'View' is not defined``.
 
 Check 2 is the one that catches mistakes like ``BuiltInCategory.OST_GenericAnnotations``
 or ``XYZ.Length``: both name a member the type does not have in Revit 2027.
@@ -18,6 +23,7 @@ or ``XYZ.Length``: both name a member the type does not have in Revit 2027.
 The API index is tools/revit_api_2027.json, refreshed with
 ``python3 tools/build_api_index.py``.
 """
+import ast
 import json
 import os
 import re
@@ -30,6 +36,9 @@ INDEX = os.path.join(HERE, 'revit_api_2027.json')
 MEMBER = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)')
 IMPORT = re.compile(r'from\s+(Autodesk\.Revit[A-Za-z.]*)\s+import\s*\(([^)]*)\)', re.S)
 IMPORT_ONE = re.compile(r'from\s+(Autodesk\.Revit[A-Za-z.]*)\s+import\s+([A-Za-z_,\s]+)')
+# A Revit type used as a bare name: OfClass(View), isinstance(x, Wall).
+CLASS_USE = re.compile(r'\bOfClass\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)')
+ISINSTANCE_USE = re.compile(r'\bisinstance\s*\([^,]+,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)')
 STRING = re.compile(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^"\n]*"|\'[^\'\n]*\'')
 COMMENT = re.compile(r'#[^\n]*')
 
@@ -82,6 +91,46 @@ def imported_types(source):
     return found
 
 
+def bound_names(tree):
+    """Every name the source binds: imports, assignments, defs and arguments.
+
+    Scope is deliberately ignored. The only question this has to answer is
+    whether a name is defined *anywhere*, which is exactly what a missing type
+    import fails; tracking scopes as well would add false alarms for no gain.
+    """
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.alias):
+            names.add((node.asname or node.name).split('.')[0])
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.Global):
+            names.update(node.names)
+    return names
+
+
+def unimported_types(source, clean, imports, types):
+    """Revit types used as bare names without an import to bind them."""
+    try:
+        bound = bound_names(ast.parse(source))
+    except SyntaxError:
+        return []           # the graph check reports syntax errors separately
+    problems = []
+    for pattern in (CLASS_USE, ISINSTANCE_USE):
+        for match in pattern.finditer(clean):
+            name = match.group(1)
+            if name in types and name not in imports and name not in bound:
+                problems.append('%s is used as a Revit type but is never imported'
+                                % name)
+    return problems
+
+
 def main():
     if not os.path.isfile(INDEX):
         print('missing %s - run: python3 tools/build_api_index.py' % INDEX)
@@ -105,6 +154,9 @@ def main():
         for name in sorted(imports):
             if name not in types:
                 errors.append('%s: imports %s, which is not in the Revit 2027 API' % (label, name))
+
+        for name in unimported_types(source, clean, imports, types):
+            errors.append('%s: %s' % (label, name))
 
         for match in MEMBER.finditer(clean):
             owner, member = match.group(1), match.group(2)

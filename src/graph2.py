@@ -44,7 +44,7 @@ clr.AddReference('RevitAPI'); clr.AddReference('RevitServices')
 from Autodesk.Revit.DB import (Arc, Line, XYZ, Wall, LocationCurve, LocationPoint, BuiltInParameter,
  BuiltInCategory, FilteredElementCollector, LinkElementId, FilePath, OpenOptions,
  Transaction, SpatialElementBoundaryOptions, SpatialElementBoundaryLocation,
- UnitTypeId, UnitUtils, StorageType, ElementId, Level, Color, CurveLoop,
+ UnitTypeId, UnitUtils, StorageType, ElementId, Level, View, Color, CurveLoop,
  DirectShape, GeometryCreationUtilities, OverrideGraphicSettings, UV)
 from RevitServices.Persistence import DocumentManager
 

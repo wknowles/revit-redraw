@@ -24,7 +24,7 @@ REVIT_NAMES = [
     'Arc', 'Line', 'XYZ', 'Wall', 'LocationCurve', 'LocationPoint', 'BuiltInParameter',
     'BuiltInCategory', 'FilteredElementCollector', 'LinkElementId', 'FilePath', 'OpenOptions',
     'Transaction', 'SpatialElementBoundaryOptions', 'SpatialElementBoundaryLocation', 'UnitTypeId',
-    'UnitUtils', 'StorageType', 'ElementId', 'Level', 'Color', 'CurveLoop', 'DirectShape',
+    'UnitUtils', 'StorageType', 'ElementId', 'Level', 'View', 'Color', 'CurveLoop', 'DirectShape',
     'GeometryCreationUtilities', 'OverrideGraphicSettings', 'UV',
 ]
 
