@@ -142,9 +142,11 @@ def state(room,tr=None,d=None,boundary_location='Finish'):
     except: rp=None
     try: level_name=room.Level.Name if room.Level else None
     except: level_name=None
+    try: area=float(room.Area)
+    except Exception: area=0.0
     base={'number':(room.Number or '').strip(),'room':room,'element_id':eidv(room.Id),
           'parameters':pvals(room),'level_id':eidv(room.LevelId),'level_name':level_name,
-          'loops':[],'boundary_ids':[],'wall_loops':[],'room_point':None}
+          'area':area,'loops':[],'boundary_ids':[],'wall_loops':[],'room_point':None}
     if segloops is None or len(segloops)==0:
         base.update({'placement_status':'NOT_PLACED','has_geometry':False,'centroid':None,'room_point':rp});return base
     loops=[];ids=[]
@@ -195,7 +197,8 @@ def bases(payload):
         out[n]={'number':n,'placement_status':pl,'has_geometry':hg,'loops':loops,
                 'centroid':X(r['centroid_internal_ft']) if r.get('centroid_internal_ft') else centroid(loops),
                 'parameters':r.get('parameters',{}),'element_id':r.get('element_id'),
-                'level_id':r.get('level_id'),'level_name':r.get('level_name')}
+                'level_id':r.get('level_id'),'level_name':r.get('level_name'),
+                'area':r.get('area_internal_sqft')}
     return out
 
 def np(x):return ('ABSENT',None) if x is None else (x.get('status'),x.get('value'))
@@ -278,10 +281,17 @@ def find_instances(host,type_id):
 def add_link(host,path):
     lt=find_link_type(host,path)
     if lt is not None:
+        # Always reload, so the merge sees the Redraw as it is on disk now and
+        # not as it was when the link was first loaded. Loading clears the
+        # undo history, so it has to happen before the merge transaction.
+        try:
+            if RevitLinkType.IsLoaded(host,lt.Id):
+                lt.Unload(None)
+        except Exception:
+            pass
+        lt.Load()
         if not RevitLinkType.IsLoaded(host,lt.Id):
-            lt.Load()
-            if not RevitLinkType.IsLoaded(host,lt.Id):
-                raise Exception('Could not load the existing Redraw link')
+            raise Exception('Could not load the existing Redraw link')
         old=find_instances(host,lt.Id)
         if old:return old,lt.Id
         tx=Transaction(host,'MVP2.4B1 - Load Redraw')
@@ -396,6 +406,7 @@ PREVIEW_MARK = 'REDRAW MERGE PREVIEW'
 PREVIEW_BLUE = (0, 120, 255)
 PREVIEW_AMBER = (255, 150, 0)
 PREVIEW_RED = (220, 40, 40)
+PREVIEW_SKIPPED = (200, 0, 200)
 
 
 def wall_points(curve):
@@ -520,6 +531,10 @@ def stand_status(base, main, redraw, tol, sp):
         if base is None:
             return 'ADDED'
         return 'MAIN_REMOVED'
+    if not redraw.get('has_geometry'):
+        # The Redraw has the room but it bounds nothing: the designer took the
+        # stand out, so its room goes too.
+        return 'REMOVED'
     gm = geom(base, main, tol, sp) if base is not None else 'ADDED'
     gr = geom(base, redraw, tol, sp) if base is not None else 'ADDED'
     mr = geom(main, redraw, tol, sp)
@@ -807,6 +822,16 @@ def write_audit(folder, base_name, rows, totals, mode, run_id):
     except Exception:
         return False
 
+def where(state):
+    """A short description of where a stand is, for the QA log."""
+    if state is None:
+        return 'absent'
+    return '%s, %.0f sqft, %d boundary wall(s)' % (
+        'placed' if state.get('has_geometry') else 'NO BOUNDARY',
+        state.get('area') or 0.0,
+        sum(len(loop) for loop in state.get('wall_loops', [])))
+
+
 def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
     """Plan the merge, one cluster at a time.
 
@@ -848,6 +873,9 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
             op['status']='SKIPPED';op['reason']=blocked
             for n in conflicted:
                 issues.append({'stand':n,'cluster':cid,'type':'GEOMETRY CONFLICT','reason':blocked})
+            for n in comp:
+                qa.append('CLUSTER %s stand %s: baseline=%s | Main=%s | Redraw=%s'
+                          %(cid,n,where(b.get(n)),where(m.get(n)),where(r.get(n))))
             gplan.append(op);continue
         if conflicted and redraw_wins:
             # The Redraw's version wins, so the conflicted stands are planned
@@ -907,7 +935,8 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
                 # The wall separates two stands that both keep a room, so
                 # removing it would put both rooms in one region.
                 guard=('The Redraw removes a wall that still separates %s, so they would '
-                       'end up in one region'%(', '.join(staying)))
+                       'end up in one region. Delete one of them in the Redraw, or leave '
+                       'the wall in the Redraw too.'%(', '.join(staying)))
                 break
         for n in affected:
             for source in (m,r):
@@ -928,7 +957,11 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
                 if wall['ref'].get('type') not in RX_TYPES:
                     guard='Unsupported Redraw wall type: '+str(wall['ref'].get('type'));break
         if guard is not None:
-            op['status']='SKIPPED';op['reason']=guard;gplan.append(op);continue
+            op['status']='SKIPPED';op['reason']=guard
+            for n in comp:
+                qa.append('CLUSTER %s stand %s: baseline=%s | Main=%s | Redraw=%s'
+                          %(cid,n,where(b.get(n)),where(m.get(n)),where(r.get(n))))
+            gplan.append(op);continue
         op['_plan']=plan
         op['_level']=component_level(affected,m)
         op['_want']={n:state_loop_points(r[n]) for n in affected if n in r and r[n].get('loops')}
@@ -998,7 +1031,15 @@ try:
     # ---- what the plan would change, for the preview ----
     bands=[];recolour=[]
     for op in gplan:
-        if op['status']!='PLANNED':continue
+        if op['status']!='PLANNED':
+            # Show what was skipped, and why, rather than leaving the plan
+            # looking empty.
+            for number in op.get('affected',[]) or op.get('stands',[]):
+                state=m.get(number)
+                if state is None:continue
+                for wd in state_walls(state).values():
+                    bands.append((wd['curve'],PREVIEW_SKIPPED))
+            continue
         plan=op['_plan']
         for wall in plan['create']:bands.append((wall['ref']['curve'],PREVIEW_BLUE))
         for wall,redraw_wall in plan['replace']:
@@ -1037,6 +1078,8 @@ try:
                 sum(1 for b2 in bands if b2[1]==PREVIEW_AMBER),
                 sum(1 for b2 in bands if b2[1]==PREVIEW_RED),
                 recoloured))
+            preview_note+=(' %d band(s) are magenta: those clusters are skipped.'
+                           %sum(1 for b2 in bands if b2[1]==PREVIEW_SKIPPED))
             if cleared:preview_note+=' Removed %d element(s) from an earlier preview.'%cleared
             qa.append(preview_note)
         except Exception as ex:
@@ -1186,7 +1229,8 @@ try:
              'Errors':hard_fail,
              'Conflicts':sum(1 for x in issues if 'CONFLICT' in x.get('type','')),
              'Redraw link removed':summary_link_removed,
-             'Preview':preview_note or 'NOT DRAWN',
+             'Preview':preview_note if preview_note else ('not drawn in apply mode'
+                                                          if apply else 'NOT DRAWN'),
              'Undo':('ONE STEP - MVP2.4B6 - Merge Redraw Updates'
                      if apply else 'NOT REQUIRED')}
 except Exception as e:

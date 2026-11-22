@@ -117,7 +117,10 @@ def stand(number, walls, element_id=None, level_name='Level 1'):
     curves = [curve for _, curve in walls]
     xs = [c.a[0] for c in curves] + [c.b[0] for c in curves]
     ys = [c.a[1] for c in curves] + [c.b[1] for c in curves]
-    centre = Point((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+    if xs:
+        centre = Point((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+    else:
+        centre = Point(0.0, 0.0)
     return {
         'number': number,
         'element_id': element_id or 1,
@@ -129,8 +132,8 @@ def stand(number, walls, element_id=None, level_name='Level 1'):
         'boundary_ids': [w['element_id'] for w in descriptors],
         'centroid': centre,
         'room_point': centre,
-        'has_geometry': True,
-        'placement_status': 'PLACED',
+        'has_geometry': bool(curves),
+        'placement_status': 'PLACED' if curves else 'NOT_PLACED',
     }
 
 
@@ -339,6 +342,41 @@ def test_wall_between_a_surviving_and_a_removed_stand_is_allowed():
           'removing the wall when the other stand goes is fine, got %r'
           % gplan[0].get('reason'))
     check(gplan[0]['walls_deleted'] == 1, 'only the shared wall should be deleted')
+
+
+def test_unplaced_stand_in_the_redraw_is_removed():
+    """A room that is still there but bounds nothing is not a stand any more,
+    so its room goes too."""
+    wall_a = Curve(0, 0, 10, 0)
+    base = {'A01': stand('A01', [(11, wall_a)], 1),
+            'A02': stand('A02', [(21, Curve(0, 10, 10, 10))], 2)}
+    main = dict(base)
+    # A02 is still in the Redraw but it has no boundary any more
+    redraw = {'A01': stand('A01', [(11, wall_a)], 1)}
+    empty = stand('A02', [], 2)
+    redraw['A02'] = empty
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
+    rooms = gplan[0]['_rooms']
+    check(('DELETE', 'A02') in rooms,
+          'the stand with no boundary should be deleted, got %s' % rooms)
+
+
+def test_skipped_cluster_reports_where_every_stand_is():
+    """The QA has to say where each stand is, so the operator can see whether
+    the Redraw really lost the stand."""
+    shared = Curve(10, 0, 10, 10)
+    base = {'A01': stand('A01', [(10, shared), (11, Curve(0, 0, 10, 0))], 1),
+            'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
+              'A02': stand('A02', [(12, Curve(20, 0, 20, 10))], 2)}
+    qa = []
+    gplan, pplan = graph2.plan_clusters(base, main, redraw, [], 0.03, 0.25, False, qa, [])
+    check(gplan[0]['status'] == 'SKIPPED', 'the cluster should be skipped')
+    check(len(qa) >= 2, 'every stand of the cluster should be reported, got %s' % qa)
+    check(any('A02' in line and 'Redraw=' in line for line in qa),
+          'the report should name the stand and say where it is, got %s' % qa)
 
 
 def main():

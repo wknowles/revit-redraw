@@ -117,7 +117,26 @@
     transaction, so undoing the merge undoes the lot. The verification compares
     against a snapshot of the Redraw's geometry taken as plain points, so it no
     longer needs the link to be alive.
-- `src/test_graph2_plan.py` grew to 14 tests, covering the shared wall guard
+- Full review after the third live run, against the Revit 2027 documentation:
+  - **The Redraw link is now always reloaded.** `RevitLinkType.Load()` "loads or
+    reloads", but only after the link is unloaded, and the old code reused an
+    already loaded link. The merge could therefore run against a Redraw that
+    was stale on disk - which would explain a plan that did not match the
+    Redraw the operator had just edited.
+  - **A stand with no boundary in the Redraw is now treated as removed.** A
+    room that is still there but bounds nothing is not a stand any more, so
+    its room is taken out of Main too.
+  - **The QA now says where every stand of a skipped cluster actually is** -
+    baseline, Main and Redraw, with its area and how many boundary walls it
+    has - so the operator can see whether the Redraw really lost the stand.
+  - **The preview shows skipped clusters** in magenta instead of showing
+    nothing, and the guard's message now says what to do about it.
+  - `Preview: NOT DRAWN` in apply mode now reads "not drawn in apply mode".
+
+- `src/test_graph2_plan.py` grew to 16 tests, covering the shared wall guard,
+  the case where the wall between two stands is removed while one of them is
+  deleted, a stand that has no boundary left in the Redraw, and the report of
+  where every stand of a skipped cluster is.
   and the case where the wall between two stands is removed while one of them
   is deleted.
 
