@@ -133,6 +133,26 @@
     nothing, and the guard's message now says what to do about it.
   - `Preview: NOT DRAWN` in apply mode now reads "not drawn in apply mode".
 
+- Fixed the fourth round of live run findings:
+  - **The QA watch was never fed.** The `List.GetItemAtIndex` that feeds the QA
+    watch had its index connected but not its list, so the watch showed
+    nothing. The Python output is now connected to it.
+  - **`Apply Updates` now defaults to false** and **`Redraw Wins On Conflicts`
+    now defaults to true**, as asked for.
+  - **`Wall.Create` wants an `ElementId` for the level**, and the component
+    level was a plain int - "No method matches given arguments for
+    Wall.Create". It is an `ElementId` now.
+  - **A cluster of stands that are all new in the Redraw had no level**,
+    because it has no stand in Main to take one from - "levelId is null". The
+    level now comes from the Redraw's level name.
+  - **A new stand is placed more carefully**: the Redraw's room point is tried
+    first and its centroid second, and a failure now says "The new stand is
+    not in an enclosed region" instead of Revit's bare message.
+  - **One Ctrl+Z now takes the preview off the plan.** In a dry run the Redraw
+    link is removed before the preview is drawn, so the preview is the last
+    transaction. The QA also says that reloading the link clears the undo
+    history from before the run.
+
 - `src/test_graph2_plan.py` grew to 16 tests, covering the shared wall guard,
   the case where the wall between two stands is removed while one of them is
   deleted, a stand that has no boundary left in the Redraw, and the report of

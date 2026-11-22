@@ -36,6 +36,19 @@ def install_stubs():
     revit = types.ModuleType('Autodesk.Revit.DB')
     for name in REVIT_NAMES:
         setattr(revit, name, type(name, (object,), {}))
+
+    class ElementId(object):
+        def __init__(self, value=-1):
+            self.Value = int(value)
+
+        def __eq__(self, other):
+            return isinstance(other, ElementId) and other.Value == self.Value
+
+        def __hash__(self):
+            return hash(self.Value)
+
+    revit.ElementId = ElementId
+
     persistence = types.ModuleType('RevitServices.Persistence')
 
     class DocumentManager(object):

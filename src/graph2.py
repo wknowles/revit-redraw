@@ -573,12 +573,24 @@ def baseline_walls(base_state):
     return out
 
 
-def component_level(component, main):
-    """The Main level id a component's walls are built on."""
+def component_level(component, main, redraw, host):
+    """The Main level a component's walls are built on.
+
+    Prefer the level of a stand that is already in Main. A cluster of stands
+    that are all new in the Redraw has none, so take the level from the
+    Redraw's level name instead.
+    """
     for number in component:
         state = main.get(number)
         if state is not None and state.get('level_id') is not None:
-            return state['level_id']
+            return ElementId(state['level_id'])
+    for number in component:
+        state = redraw.get(number)
+        if state is None:
+            continue
+        level = find_level_by_name(host, state.get('level_name'))
+        if level is not None:
+            return level.Id
     return None
 
 
@@ -605,6 +617,10 @@ def create_wall(host, level_id, wd):
     wall_type = types.get(wd['type'])
     if wall_type is None:
         raise Exception('Wall type not found in Main: ' + str(wd['type']))
+    if level_id is None:
+        raise Exception('No level to build the wall on')
+    if not isinstance(level_id, ElementId):
+        level_id = ElementId(int(level_id))
     height = wd.get('height')
     if height is None or height <= 0:
         height = 10.0
@@ -615,12 +631,28 @@ def create_wall(host, level_id, wd):
 
 def create_room(host, level, redraw_state, number, parameter_values):
     """Create a stand that the Redraw added."""
-    point = redraw_state.get('room_point') or redraw_state.get('centroid')
-    if point is None:
+    candidates = []
+    for source in ('room_point', 'centroid'):
+        point = redraw_state.get(source)
+        if point is not None:
+            candidates.append(point)
+    if not candidates:
         raise Exception('Redraw Room has no usable location point')
-    room = host.Create.NewRoom(level, UV(point.X, point.Y))
+    room = None
+    problems = []
+    for point in candidates:
+        try:
+            room = host.Create.NewRoom(level, UV(point.X, point.Y))
+        except Exception as ex:
+            problems.append(str(ex))
+            continue
+        if room is None:
+            problems.append('NewRoom returned nothing')
+            continue
+        break
     if room is None:
-        raise Exception('NewRoom returned nothing')
+        raise Exception('The new stand is not in an enclosed region (%s)'
+                        % ('; '.join(problems) if problems else 'unknown'))
     room.Number = number
     written = []
     for name in PARAMS:
@@ -963,7 +995,7 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
                           %(cid,n,where(b.get(n)),where(m.get(n)),where(r.get(n))))
             gplan.append(op);continue
         op['_plan']=plan
-        op['_level']=component_level(affected,m)
+        op['_level']=component_level(affected,m,r,doc)
         op['_want']={n:state_loop_points(r[n]) for n in affected if n in r and r[n].get('loops')}
         rooms=[]
         for n in affected:
@@ -998,6 +1030,8 @@ try:
     with open(side,'r',encoding='utf-8') as f:payload=json.load(f)
     loc=validate(payload,rvt,side,doc,qa,issues)
     lnk,link_type_id=add_link(doc,rvt);cleanup=True;ldoc=lnk.GetLinkDocument()
+    qa.append('The Redraw link was reloaded, so the undo history before this run '
+              'is gone. The run\'s own changes can still be undone.')
     if ldoc is None:raise Exception('Redraw link is unavailable')
     tol=UnitUtils.ConvertToInternalUnits(tol_m,UnitTypeId.Meters);sp=UnitUtils.ConvertToInternalUnits(sp_m,UnitTypeId.Meters)
     b=bases(payload);m=collect(doc,None,qa,'Main',loc);r=collect(ldoc,lnk.GetTotalTransform(),qa,'Redraw',loc)
@@ -1059,8 +1093,17 @@ try:
     if not apply:
         for op in pplan:op.pop('_target',None);pout.append(op)
         for op in gplan:
-            op.pop('_plan',None);op.pop('_rooms',None);op.pop('_level',None)
+            op.pop('_plan',None);op.pop('_rooms',None);op.pop('_level',None);op.pop('_want',None)
             op['status']='PLANNED';gout.append(op)
+        # The link goes first, so the preview is the last transaction and one
+        # Ctrl+Z takes the bands off the plan.
+        if cleanup and link_type_id is not None:
+            try:
+                remove_link_type(doc,link_type_id)
+                cleanup=False
+                summary_link_removed='YES'
+            except Exception as ex:
+                qa.append('LINK: could not remove the Redraw link: '+str(ex))
         # Draw the visual diff so the plan can be checked on the plan. Creating
         # the bands and recolouring the walls both modify the document, so
         # they need a transaction.
@@ -1184,12 +1227,7 @@ try:
                 if op['status']!='VERIFIED':op['reason']='Main value does not match Redraw after update'
             op.pop('_target',None);pout.append(op)
     # An apply removes the link inside the merge transaction, so one undo
-    # takes the whole merge back. A dry run has no merge, so the link is
-    # removed on its own afterwards.
-    if cleanup and link_type_id is not None:
-        remove_link_type(doc,link_type_id)
-        cleanup=False
-        summary_link_removed='YES'
+    # takes the whole merge back. A dry run removed it before the preview.
 
     # ---- the audit trail ----
     try:
