@@ -133,6 +133,10 @@
     nothing, and the guard's message now says what to do about it.
   - `Preview: NOT DRAWN` in apply mode now reads "not drawn in apply mode".
 
+- Added `HANDOFF.md`: a working snapshot of the graph 2 rebuild - the design,
+  the confirmed Revit 2027 API facts, the bugs found, where the work stands and
+  what is next. A working note for the current effort, not a product document.
+
 - Fixed the last live run finding: **a new stand's room was never created.**
   The cluster failed with the reason "0", which is `str(KeyError(0))` - the
   Redraw's parameters are a dict of status and value, and the new code read
