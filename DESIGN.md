@@ -11,7 +11,8 @@ Deferred work and known gaps: `ROADMAP.md`.
    Redraw RVT in a chosen folder. Designers edit the Redraw freely.
 2. `2. Compare and Update Redraw.dyn` — run against Main with the Redraw folder:
    three-way compare (baseline vs Main vs Redraw), merge Redraw-only parameter and
-   geometry changes back into Main, verify, then remove the Redraw link.
+   geometry changes back into Main, verify, then close the Redraw document it opened
+   for reading. Nothing is linked into Main, so Undo is one step.
 
 Room Number is the stand key and is assumed **globally unique** (business decision).
 Duplicates are errors in graph 1 and skipped-with-QA in graph 2.
@@ -102,8 +103,8 @@ Top level: `schema_version`, `snapshot_type: "REDRAW_BASELINE"`, `baseline_id` (
 Inputs: `IN[0]` Redraw directory, `IN[1]` tolerance metres (default 0.01),
 `IN[2]` boundary sample spacing metres (default 0.25), `IN[3]` `Apply Updates`
 (default False in code; saved graph defaults **true**). Metres are converted to
-internal feet via `UnitUtils`. `OUT = (summary, pout, gout, issues, qa)`; only
-indices 0–3 are wired (see `AGENTS.md` output-wiring gotcha).
+internal feet via `UnitUtils`. `OUT = (summary, pout, gout, issues, qa)`; all
+five are wired to watches.
 
 ### Pipeline
 1. **Files/active document**: exactly one primary `.rvt` + one `*.baseline.json` in
@@ -114,16 +115,19 @@ indices 0–3 are wired (see `AGENTS.md` output-wiring gotcha).
    `stands`, project number match against Main's Project Information Number.
    Mismatch -> fatal; missing on either side -> `IDENTITY WARNING` in `issues`
    (wired) and `qa`.
-3. **Link** (`add_link`): find existing link type by absolute external-file path;
-   `Load()` it if unloaded (outside transactions - `Load` clears undo history);
-   reuse an existing instance of that type, else create type+instance in one
-   transaction (`MVP2.4B1 - Load Redraw`). Returns `(instance, link_type_id)`;
-   cleanup always has the type id. Redraw rooms are read through
-   `GetTotalTransform()` into Main coordinates.
+3. **Read the Redraw** (`open_redraw`): `Application.OpenDocumentFile` opens the
+   Redraw as a separate document; Main is brought back to the foreground, and the
+   document is closed again in `finally`. There is **no Revit link**: loading one
+   clears Revit's undo history, and a link type created before the merge can never
+   be removed by the same undo that removes the merge, so a clean one-step undo is
+   impossible with a link. No transform is needed either: graph 1 writes the Redraw
+   as a copy of Main (`Application.CopyModel`, or a detached `SaveAs` of central),
+   so the Redraw's internal coordinates *are* Main's.
 4. **Collect**: three-way states - baseline (`bases`), Main, Redraw - at the
    baseline's boundary location. Each state has parameters, boundary loops, wall
    descriptors (type/level/height/offset/flipped/curve), centroid, room point and
-   level id and name.
+   level id and name. The Room Tag types and views already in the model are read
+   now (`room_tag_templates`), before anything is merged.
 5. **Classify** every stand (`stand_status`): `UNCHANGED`, `ALREADY`, `CONFLICT`,
    `AFFECTED`, `ADDED`, `REMOVED`, `MAIN_ONLY`, `MAIN_REMOVED`. `ALREADY` means
    Main already is what the Redraw wants - that is not a conflict.
@@ -138,13 +142,16 @@ indices 0–3 are wired (see `AGENTS.md` output-wiring gotcha).
    A cluster with a conflict is skipped unless `Redraw Wins On Conflicts` is set.
    The RX wall type rule and the "boundary must be made of walls" rule are
    checked here.
-8. **Preview** (dry run) or **Apply** (one transaction `MVP2.4B6 - Merge Redraw
-   Updates`, so Undo is one step): delete the walls to go, create the walls to
-   come, then create, delete and move the rooms, then the parameters. After the
-   commit, re-collect Main and verify each cluster against the Redraw.
-9. **Cleanup**: remove the Redraw link type (`MVP2.4B1 - Remove Redraw Link`) only
-   after verification, because link-derived curves die with the link. Emergency
-   cleanup in `finally` on any earlier failure.
+8. **Preview** (dry run, one transaction `Redraw Merge Preview`) or **Apply** (two
+   transactions: `Redraw Merge - Clear Preview`, then `MVP2.4B6 - Merge Redraw
+   Updates`): delete the walls to go, create the walls to come, then create, delete
+   and move the rooms, tag the added stands, and write the parameters. After the
+   commit, re-collect Main and verify each cluster against the Redraw. The merge is
+   the only transaction that edits Main, so one Ctrl+Z puts Main back exactly where
+   it was; the preview cleanup runs first in its own transaction so undoing the
+   merge does not bring the bands back.
+9. **Close the Redraw** (`close_redraw` in `finally`): the document is closed
+   whatever happened, and Main is activated again.
 10. **Audit trail**: every run appends to `<title>.merge-log.csv` and rewrites
     `<title>.merge-summary.csv` next to the Redraw.
 
@@ -159,7 +166,10 @@ A dry run draws the difference on the plan instead of only describing it:
 
 The two Main colours are drawn by recolouring the existing walls with
 `View.SetElementOverrides`, so they need no temporary geometry. Only the Redraw's
-new positions need a band. The preview is removed by the next run of the graph.
+new positions need a band. Each band carries the marker `REDRAW MERGE PREVIEW
+v=<view> w=<walls>` in its element name (`DirectShape.SetName`) and Comments, and
+the next run removes it by marker and then sweeps every view's overrides for the
+preview colours, so an unmarked band from an older run cannot survive.
 
 ## 4. Decisions and rationale (business + technical)
 
@@ -196,6 +206,15 @@ offline. Straight walls are matched by their ends, which is exact and O(1).
   work; the old optional boolean was misleading and is gone.
 - **Detached, non-workshared Redraw** — designers edit without worksharing overhead;
   `DetachAndDiscardWorksets` keeps the copy clean.
+- **No Revit link in graph 2** — the Redraw is read from a document opened on the
+  fly and closed again. Loading a link clears Revit's undo history, and the link
+  type can never be removed by the same undo that removes the merge, so a link can
+  never give the one-step undo the operator wants. The Redraw is a copy of Main, so
+  its internal coordinates are Main's and no transform is needed.
+- **Tags follow the model's own tags** — a stand the Redraw added gets a Room Tag in
+  every view that already carries Room Tags, with the type that view uses, on the
+  Room's location point; a moved stand's tags are re-centred in every view that has
+  them, not just the active view.
 - **Centerline boundaries** — graph 1 extracts at `SpatialElementBoundaryLocation.Center`
   so Redraw geometry follows wall centerlines; graph 2 honors the baseline location
   for Main, Redraw and verification. Model-level room area settings are not changed.
@@ -213,7 +232,6 @@ offline. Straight walls are matched by their ends, which is exact and O(1).
 - **Narrow geometry scope** — only REDRAW_ONLY changes on existing rooms bounded by
   the two hardcoded RX wall types; everything else is skipped/reported, never
   auto-fixed. Conservative by design.
-- **Late link removal** — verification needs live link geometry.
 
 ## 5. Revit API facts relied on (verified against docs)
 
@@ -235,6 +253,10 @@ offline. Straight walls are matched by their ends, which is exact and O(1).
   that path already exists** — hence find/reuse first.
 - `RevitLinkType.IsLoaded(Document, ElementId)`; `RevitLinkType.Load()` regenerates,
   clears undo history, and must run with no open transaction.
+- **`Application.OpenDocumentFile(ModelPath, OpenOptions)`** opens a second document
+  without touching the active one; `Document.Close(False)` closes it without saving.
+  Neither clears the active document's undo history — that is why graph 2 reads the
+  Redraw this way instead of linking it.
 - `Element.GetExternalFileReference().GetAbsolutePath()` returns an absolute
   `ModelPath` regardless of stored relative/absolute path type;
   `ModelPathUtils.ConvertModelPathToUserVisiblePath` for comparison.
@@ -261,6 +283,16 @@ offline. Straight walls are matched by their ends, which is exact and O(1).
 - `Document.Create.NewRoom(Level, UV)` — the position is a `UV`, not an `XYZ`.
   Revit **auto-numbers** a new room from the sequence, so an added stand must
   have its Number set explicitly.
+- `Document.Create.NewRoomTag(LinkElementId, UV, ElementId)` creates a Room Tag in
+  a given view; `LinkElementId(ElementId)` wraps a host-model Room's id. A view
+  that is not a plan or section view throws `ArgumentException`, and Revit returns
+  `null` when the tag cannot be created — both are reported per view, not fatal.
+  `Element.ChangeTypeId(ElementId)` matches the tag type the view already uses,
+  and `RoomTag.TagHeadPosition` moves the head.
+- `DirectShape.SetName(string)` sets a DirectShape's element name, which is how the
+  preview bands are marked for later cleanup (`Element.Name` reads it back).
+- `View.GetElementOverrides()` lists every element override in a view, so leftover
+  preview colours can be found without relying on a marker.
 - **`WorksharingUtils.GetCentralModelPath(Document)` does not exist in Revit
   2027.** Use `Document.GetWorksharingCentralModelPath()`, which returns the
   central path or null, and throws `InvalidOperationException` when the

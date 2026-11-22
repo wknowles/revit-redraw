@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-11-22 — No link, tags for added stands, and a preview that always clears
+
+The first apply run on the live model created stand A05's walls and Room, but
+left three things wrong: the new Room had no tag, one Ctrl+Z did not put Main
+back where it was, and the preview bands from the dry run survived the apply.
+
+- **The Redraw is no longer linked into Main.** Loading a link clears Revit's
+  undo history, and a link type created before the merge can never be removed by
+  the same undo that removes the merge - so with a link, one Ctrl+Z always left
+  the Redraw visible in the plan. Graph 2 now opens the Redraw as a separate
+  document (`Application.OpenDocumentFile`), reads it, and closes it in
+  `finally`. No transform is needed: graph 1 writes the Redraw as a copy of
+  Main, so its internal coordinates are Main's. The merge is now the only
+  transaction that edits Main.
+- **Undo is one step for real.** An apply is two transactions - the old preview
+  is cleared first (`Redraw Merge - Clear Preview`), *then* the merge runs
+  (`MVP2.4B6 - Merge Redraw Updates`) - so undoing the merge does not bring the
+  bands back. A dry run is one transaction.
+- **A stand the Redraw added gets Room Tags**, not just a Room: one tag per view
+  that already carries Room Tags (`Document.Create.NewRoomTag`), with the type
+  that view uses (`Element.ChangeTypeId`), on the Room's location point. A view
+  that refuses the tag is reported in QA, not fatal.
+- **Tags of a moved stand are re-centred in every view that has them**, not only
+  the active view.
+- **The preview always clears.** Bands are marked with
+  `DirectShape.SetName('REDRAW MERGE PREVIEW v=<view> w=<walls>')` as well as in
+  their Comments - the Comments parameter is not guaranteed to exist on a
+  DirectShape, and the old cleanup silently skipped everything when it was
+  missing. After the markers, every view is swept with
+  `View.GetElementOverrides()` for the four preview colours: an unmarked band
+  from an older run is deleted, a recoloured wall is reset. The Summary reports
+  how much was removed.
+- **The run is readable now.** The Summary gained `Rooms created` and
+  `Redraw document closed`; QA gains one line per applied cluster, a line per
+  added stand naming which of the six merged parameters are blank in the Redraw
+  (A05's `params_written: 0` was invisible before), and any tag/preview
+  problem.
+- `LinkElementId` joined `tools/revit_api_2027.json`; the API audit and the
+  offline tests cover the new marker round trip.
+
 ## 2026-11-22 — Wall level merge, visual preview and audit trail
 
 - Graph 2 failed on its first run after the rebuild, and the reason was

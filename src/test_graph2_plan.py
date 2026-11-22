@@ -22,9 +22,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'src'))
 # graph2 imports the Revit API at module level, so stub it before importing.
 REVIT_NAMES = [
     'Arc', 'Line', 'XYZ', 'Wall', 'LocationCurve', 'LocationPoint', 'BuiltInParameter',
-    'BuiltInCategory', 'FilteredElementCollector', 'RevitLinkInstance', 'RevitLinkType',
-    'RevitLinkOptions', 'FilePath', 'ImportPlacement', 'Transaction', 'ModelPathUtils',
-    'SpatialElementBoundaryOptions', 'SpatialElementBoundaryLocation', 'UnitTypeId',
+    'BuiltInCategory', 'FilteredElementCollector', 'LinkElementId', 'FilePath', 'OpenOptions',
+    'Transaction', 'SpatialElementBoundaryOptions', 'SpatialElementBoundaryLocation', 'UnitTypeId',
     'UnitUtils', 'StorageType', 'ElementId', 'Level', 'Color', 'CurveLoop', 'DirectShape',
     'GeometryCreationUtilities', 'OverrideGraphicSettings', 'UV',
 ]
@@ -420,6 +419,33 @@ def test_added_stand_collects_its_parameters():
         values[name] = entry.get('value')
     check(values == {'Product Code': 'PX-114'},
           'only the parameter with a value should be copied, got %s' % values)
+
+
+def test_preview_marker_round_trips():
+    """The marker is what a later run uses to find a band again, so the view
+    and the walls it recoloured have to survive the round trip."""
+    text = graph2.preview_marker(3145, [101, 102, 103])
+    check(text.startswith(graph2.PREVIEW_MARK),
+          'the marker should start with the preview mark, got %r' % text)
+    view, walls = graph2.parse_preview_marker(text)
+    check(view == 3145, 'the view id should round trip, got %r' % view)
+    check(walls == [101, 102, 103], 'the wall ids should round trip, got %r' % walls)
+
+
+def test_preview_marker_without_walls_round_trips():
+    """Blue bands recolour nothing, so their marker carries no walls."""
+    text = graph2.preview_marker(77, [])
+    view, walls = graph2.parse_preview_marker(text)
+    check(view == 77, 'the view id should round trip, got %r' % view)
+    check(walls == [], 'the walls should be empty, got %r' % walls)
+
+
+def test_preview_marker_parses_the_older_format():
+    """The markers left by earlier runs only carried the wall ids; the sweep
+    has to find their overrides once the marker cannot name a view."""
+    view, walls = graph2.parse_preview_marker('REDRAW MERGE PREVIEW walls=5,6')
+    check(view is None, 'the older marker has no view, got %r' % view)
+    check(walls == [], 'the older format does not use w=, got %r' % walls)
 
 
 def main():

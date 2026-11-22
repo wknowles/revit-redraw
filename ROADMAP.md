@@ -31,10 +31,16 @@ mocked pure-function tests passed. Run this checklist first:
 
 ### Graph 2
 - [ ] Guards: active document is the Redraw → fatal; Redraw RVT still open → fatal.
-- [ ] Dry run (`Apply Updates` false) from Main with Redraw closed: plans only, link
-      loaded then removed. Unchanged model → no geometry changes.
+- [ ] Dry run (`Apply Updates` false) from Main with Redraw closed: plans only, the
+      Redraw document is opened for reading and closed again. Unchanged model → no
+      geometry changes.
 - [ ] Apply: REDRAW_ONLY parameter writes verified; REDRAW_ONLY geometry rebuilds
-      walls, moves room, recenters tags in the active view; **Undo is one step**.
+      walls, moves room, recenters its tags in every view that has them; a stand the
+      Redraw added gets its Room **and** Room Tags in every view that has tags;
+      **one Ctrl+Z puts Main back exactly where it was** (no link, no bands).
+- [ ] Preview removal: after an apply, the previous run's bands and wall colours are
+      gone — including bands left by the *older* link-based runs, which carry no name
+      marker and are found by the override sweep.
 - [ ] Level mismatch (Main or Redraw room on a different level) → geometry skipped,
       parameters still merged.
 - [ ] Project number mismatch → fatal; missing number → `IDENTITY WARNING` visible
@@ -43,8 +49,8 @@ mocked pure-function tests passed. Run this checklist first:
       Verify use the baseline's boundary location.
 - [ ] Old baseline (pre-MVP2.4C, no level metadata / `merge_parameters`) still passes
       validation and behaves sanely.
-- [ ] Pre-existing Redraw link type (loaded and unloaded) is reused, not duplicated;
-      link type removed after verification; emergency cleanup on forced mid-run error.
+- [ ] The Redraw document is closed at the end of every run, including a failed one;
+      Main is the active document again.
 - [ ] Conflicts (both sides changed), shared walls, non-RX wall types, Room
       Separation Line boundaries → skipped/reported, never modified.
 
@@ -55,8 +61,9 @@ mocked pure-function tests passed. Run this checklist first:
   Added/removed/replaced rooms, placement changes, level mismatches and conflicts
   are skipped, not fixed.
 - **Room Separation Lines unsupported** anywhere in the geometry path.
-- **Tags**: only tags in the *active view* are captured/recentered; other views'
-  tags may drift after a room move.
+- **Tags**: a new stand is tagged in every view that already carries Room Tags; a
+  moved stand's tags are re-centred in every view that has them. A view that refuses
+  the new tag is reported, not fatal.
 - **Wall rebuild** copies type/height/offset/flipped from Redraw; height fallback
   10 ft; joins, inserts (doors/openings) and wall-type variations beyond the two RX
   types are not handled.
@@ -64,9 +71,9 @@ mocked pure-function tests passed. Run this checklist first:
   close/delete the temp central, but Revit may refuse to close a document hosting
   the Dynamo run. In that case the summary warns and the operator must clean up
   manually.
-- **Graph 2 `qa` (`OUT[4]`) is not wired**; fatal reasons are only visible via the
-  Summary status or by inspecting the node. Watch labels for `gout`/`issues` are
-  misnamed ("Parameter Conflicts"/"Errors").
+- **Graph 2 opens the Redraw document during the run** — it appears in Revit's
+  document switcher and is closed again at the end; if the close is refused, the
+  Summary says `Redraw document closed: NO` and QA names it.
 - **Directory inputs ship blank** — operators must select the folder on every run.
   This is intentional: local paths are not published.
 - **No automated tests**; `.dyn` edits are hand/programmatic JSON surgery
@@ -80,33 +87,29 @@ mocked pure-function tests passed. Run this checklist first:
 
 Ordered roughly by value/effort; none are committed.
 
-1. **Surface graph 2 QA**: wire `OUT[4]` to a watch (add a `List.GetItemAtIndex` +
-   code-block index) and fix the `gout`/`issues` watch labels. Small, high value —
-   fatal reasons are currently invisible.
-2. **In-Revit regression pass** (section 1) and then a small sample Main/Redraw pair
+1. **In-Revit regression pass** (section 1) and then a small sample Main/Redraw pair
    checked into the repo as a manual test fixture.
-3. **Add a pre-commit check** for JSON validity and embedded `py_compile` (the
+2. **Add a pre-commit check** for JSON validity and embedded `py_compile` (the
    `AGENTS.md` recipe automated); the repo and initial commit already exist.
-4. **Harden cloud temp-central cleanup**: graph 1 now attempts to reactivate Main,
+3. **Harden cloud temp-central cleanup**: graph 1 now attempts to reactivate Main,
    close/delete the temp central and close the Redraw; verify this in Revit. If
    closing the host document is refused, investigate a supported cloud→local detach
    path or a safe deferred close (e.g. Idling event) instead of the manual fallback.
-5. **Added/removed room handling**: report-only today; next step could be guided
+4. **Added/removed room handling**: report-only today; next step could be guided
    creation of new rooms/walls from Redraw, or explicit deletion plans — both need
    new conflict rules and probably a review step.
-6. **Room Separation Line support** in boundaries (eligibility, rebuild, verify).
-7. **Multi-view tag recentering** (collect tags across views, not just active view).
-8. **Conflict resolution UX**: today conflicts are listed and skipped; a future
+5. **Room Separation Line support** in boundaries (eligibility, rebuild, verify).
+6. **Conflict resolution UX**: today conflicts are listed and skipped; a future
    graph could let the operator choose Main-wins/Redraw-wins per stand/parameter.
-9. **Level-change support**: currently skipped; could allow deliberate level moves
+7. **Level-change support**: currently skipped; could allow deliberate level moves
    with wall level reassignment.
-10. **QA sidecar / audit trail** (was explicitly deferred): persist QA + merge
-    results next to the baseline if the business wants a record; would change the
-    one-RVT/one-JSON folder contract.
-11. **Transaction/version hygiene**: decide whether to drop MVP prefixes from the
-    apply/link transaction names; keep `schema_version` bumps coordinated across
-    both graphs.
-12. **Parameterise wall types / merged parameters** instead of hardcoding, if the
+8. **QA sidecar / audit trail** (was explicitly deferred): persist QA + merge
+   results next to the baseline if the business wants a record; would change the
+   one-RVT/one-JSON folder contract.
+9. **Transaction/version hygiene**: decide whether to drop MVP prefixes from the
+   apply transaction name; keep `schema_version` bumps coordinated across both
+   graphs.
+10. **Parameterise wall types / merged parameters** instead of hardcoding, if the
     business rules start varying per project (keep the cross-graph contract check).
 
 ## 4. Contract rules for any future change

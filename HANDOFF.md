@@ -176,29 +176,33 @@ this session because the calls were wrapped in `except` blocks.
   cluster **C1 VERIFIED**: 3 walls deleted, 2 created, 7 kept, 2 rooms moved,
   2 tags moved.
 - The preview bands and colours show, and one Ctrl+Z takes them off.
-- Undo is one step for the merge.
+- The new stand **A05** is created: its 4 walls and its Room land in Main.
 
-**Last outstanding:** the new stand **A05** — its 4 walls were created but its
-Room was not (the `KeyError(0)` bug, fixed in `0479a57`).
+**Fixed after the first apply run (not yet verified in Revit):**
+
+- A05 had no Room Tag; moved stands' tags were only re-centred in the active view.
+- Undo was not one step: the Redraw **link** cleared the undo history when it was
+  loaded, and undoing the merge restored the link type. Graph 2 no longer links
+  the Redraw at all — it opens it as a document and closes it.
+- The preview bands survived an apply: the cleanup depended on the Comments
+  parameter existing on a DirectShape, and swallowed every failure. Bands are now
+  marked with `DirectShape.SetName`, and every view's overrides are swept for the
+  preview colours.
 
 ## 8. Next steps
 
-1. **Re-run graph 2 with Apply Updates = true** and report:
-   - the **QA / Errors** watch (now wired)
-   - the **Parameter Updates** watch (A05's six parameters)
-   - whether A05's Room was created with the right Number and parameters
-2. If A05's Room still will not place, the message is now specific:
-   *"The new stand is not in an enclosed region"* plus Revit's reason — that
-   says whether its four new walls actually enclose it (a gap in the run, or the
-   wrong level).
-3. Watch for Revit's room numbering: if Main already has an `A05`, the new
-   room may land as `A06` before being renamed. The Parameter Updates watch
-   shows what was written.
-4. Then: the CSV audit trail exists but has never been run in anger — check the
-   file appears next to the Redraw with sensible rows.
-5. Still to build: text notes per stand in the preview (identity labels); tags
-   in views other than the active view; `ROADMAP.md` needs updating (the
-   "unshared walls only" rule is gone).
+1. **Re-run graph 2 on the live model**, both modes, and check the in-Revit
+   checklist in `ROADMAP.md` §1 (Graph 2), in particular:
+   - the Summary says `Redraw document closed: YES` and `Rooms created: 1`;
+   - A05 has a Room Tag in every view that has Room Tags, with the same type;
+   - the dry run's bands are gone after the apply;
+   - **one Ctrl+Z after the apply puts Main back exactly where it was**.
+2. The bands left over from the *older* link-based runs carry no name marker;
+   the override sweep should still delete them. If any survive, QA names what
+   could not be removed.
+3. The CSV audit trail has never been run in anger — check the file appears next
+   to the Redraw with sensible rows.
+4. Still to build: text notes per stand in the preview (identity labels).
 
 ## 9. Gotchas for the next session
 
@@ -213,10 +217,15 @@ Room was not (the `KeyError(0)` bug, fixed in `0479a57`).
 - `tools/check_calls.py` catches wrong argument counts; `tools/check_api.py`
   catches API names that do not exist in 2027. **Run `tools/check_repo.py`
   before every commit.**
-- **The link reload clears Revit's undo history** (documented behaviour). The
-  operator can undo *the run*, but not past it. If that is unacceptable,
-  reload only when the Redraw file's timestamp changed — that needs a small
-  sidecar file next to the Redraw.
+- **Graph 2 must never link the Redraw again.** `RevitLinkType.Load()` clears
+  Revit's undo history, and undoing the merge always restores the link type, so a
+  link can never give the one-step undo the operator wants. Read the Redraw from
+  a document opened with `Application.OpenDocumentFile` and closed in `finally`;
+  no transform is needed because graph 1 writes the Redraw as a copy of Main.
+- **Do not mark preview elements with the Comments parameter alone.** It is not
+  guaranteed to exist on a DirectShape, and the old cleanup silently skipped
+  everything when it was missing. Use `DirectShape.SetName`, and let the override
+  sweep (`View.GetElementOverrides`) catch anything unmarked.
 - `phase0/` is a diagnostic tool, **not** part of the 1 → 2 workflow.
 - The `ROADMAP.md` in-Revit checklist has still never been run against the
   rebuilt graph.

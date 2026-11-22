@@ -16,6 +16,12 @@ OUT[4] QA / Errors
 
 Boundary location is read from the baseline (Center or Finish).
 
+The Redraw is read from its own document, not from a Revit link. Graph 1 writes
+the Redraw as a copy of Main, so its internal coordinates are Main's and no
+transform is needed; and opening a document - unlike loading a link - does not
+clear Revit's undo history. Nothing but the merge transaction edits Main, so
+one Ctrl+Z puts Main back exactly where it was.
+
 The merge compares at wall level, not at room level, so a cluster of connected
 stands merges as one change. For each cluster of stands that share walls:
 
@@ -36,9 +42,8 @@ Scope is deliberately controlled:
 import clr, os, json, math, re, uuid
 clr.AddReference('RevitAPI'); clr.AddReference('RevitServices')
 from Autodesk.Revit.DB import (Arc, Line, XYZ, Wall, LocationCurve, LocationPoint, BuiltInParameter,
- BuiltInCategory, FilteredElementCollector, RevitLinkInstance, RevitLinkType,
- RevitLinkOptions, FilePath, ImportPlacement, Transaction, ModelPathUtils,
- SpatialElementBoundaryOptions, SpatialElementBoundaryLocation,
+ BuiltInCategory, FilteredElementCollector, LinkElementId, FilePath, OpenOptions,
+ Transaction, SpatialElementBoundaryOptions, SpatialElementBoundaryLocation,
  UnitTypeId, UnitUtils, StorageType, ElementId, Level, Color, CurveLoop,
  DirectShape, GeometryCreationUtilities, OverrideGraphicSettings, UV)
 from RevitServices.Persistence import DocumentManager
@@ -247,82 +252,64 @@ def files(folder):
     if len(js)!=1:raise Exception('Redraw directory must contain one baseline JSON')
     return rv[0],js[0]
 
-def norm(p):return os.path.normcase(os.path.abspath(p))
-def find_link(host,path):
-    target=norm(path);found=[]
-    for x in FilteredElementCollector(host).OfClass(RevitLinkInstance).ToElements():
-        try:
-            ld=x.GetLinkDocument()
-            if ld and ld.PathName and norm(ld.PathName)==target:found.append(x)
-        except:pass
-    if len(found)>1:raise Exception('Multiple Redraw link instances found')
-    return found[0] if found else None
+def same_path(a,b):
+    """True when two path strings name the same file."""
+    try:
+        return bool(a) and bool(b) and os.path.normcase(os.path.abspath(a))==os.path.normcase(os.path.abspath(b))
+    except Exception:
+        return False
 
-def find_link_type(host,path):
-    target=norm(path);found=[]
-    for t in FilteredElementCollector(host).OfClass(RevitLinkType).ToElements():
-        try:
-            ref=t.GetExternalFileReference()
-            p=ref.GetAbsolutePath() if ref is not None else None
-            if p is not None and norm(ModelPathUtils.ConvertModelPathToUserVisiblePath(p))==target:found.append(t)
-        except:pass
-    if len(found)>1:raise Exception('Multiple Redraw link types found')
-    return found[0] if found else None
 
-def find_instances(host,type_id):
-    found=[]
-    for x in FilteredElementCollector(host).OfClass(RevitLinkInstance).ToElements():
-        try:
-            if x.GetTypeId()==type_id:found.append(x)
-        except:pass
-    if len(found)>1:raise Exception('Multiple Redraw link instances found')
-    return found[0] if found else None
+def open_redraw(doc,path):
+    """The Redraw document, opened for reading.
 
-def add_link(host,path):
-    lt=find_link_type(host,path)
-    if lt is not None:
-        # Always reload, so the merge sees the Redraw as it is on disk now and
-        # not as it was when the link was first loaded. Loading clears the
-        # undo history, so it has to happen before the merge transaction.
+    Graph 1 writes the Redraw as a copy of Main, so its internal coordinates
+    are Main's and no transform is needed. Opening a document does not clear
+    Revit's undo history the way loading a link does, and it leaves nothing
+    behind in Main, so the run's own changes are the only thing to undo.
+    """
+    try:
+        return doc.Application.OpenDocumentFile(FilePath(path),OpenOptions())
+    except Exception as ex:
+        raise Exception('Could not open the Redraw for reading: '+str(ex))
+
+
+def activate_main(doc,qa):
+    """Bring Main back to the foreground after the Redraw was opened.
+
+    Opening a document makes it the active one, and the merge edits Main's
+    views, so Main goes back first. Best effort: if Main has never been saved
+    there is no path to activate and the QA says so.
+    """
+    try:
+        if not doc.PathName:
+            qa.append('Main has no saved path, so it could not be brought back to the foreground.')
+            return
+        ui=DocumentManager.Instance.CurrentUIApplication
+        if ui is None:
+            return
+        active=None
         try:
-            if RevitLinkType.IsLoaded(host,lt.Id):
-                lt.Unload(None)
+            active=ui.ActiveUIDocument.Document if ui.ActiveUIDocument else None
         except Exception:
-            pass
-        lt.Load()
-        if not RevitLinkType.IsLoaded(host,lt.Id):
-            raise Exception('Could not load the existing Redraw link')
-        old=find_instances(host,lt.Id)
-        if old:return old,lt.Id
-        tx=Transaction(host,'MVP2.4B1 - Load Redraw')
-        try:
-            tx.Start();inst=RevitLinkInstance.Create(host,lt.Id,ImportPlacement.Origin);tx.Commit();return inst,lt.Id
-        except:
-            try:tx.RollBack()
-            except:pass
-            raise
-    old=find_link(host,path)
-    if old:return old,old.GetTypeId()
-    tx=Transaction(host,'MVP2.4B1 - Load Redraw')
-    try:
-        tx.Start();res=RevitLinkType.Create(host,FilePath(path),RevitLinkOptions(False))
-        inst=RevitLinkInstance.Create(host,res.ElementId,ImportPlacement.Origin);tx.Commit();return inst,res.ElementId
-    except:
-        try:tx.RollBack()
-        except:pass
-        raise
+            active=None
+        if active is not None and same_path(active.PathName,doc.PathName):
+            return
+        ui.OpenAndActivateDocument(FilePath(doc.PathName),OpenOptions(),False)
+    except Exception as ex:
+        qa.append('Could not bring Main back to the foreground: '+str(ex))
 
-def remove_link_type(host,type_id,inside_transaction=False):
-    if inside_transaction:
-        host.Delete(type_id)
-        return True
-    tx=Transaction(host,'MVP2.4B1 - Remove Redraw Link')
+
+def close_redraw(doc,rdoc,qa):
+    """Close the Redraw document again. True when it closed."""
+    closed=True
     try:
-        tx.Start();host.Delete(type_id);tx.Commit();return True
-    except:
-        try:tx.RollBack()
-        except:pass
-        raise
+        rdoc.Close(False)
+    except Exception as ex:
+        closed=False
+        qa.append('Could not close the Redraw document: '+str(ex))
+    activate_main(doc,qa)
+    return closed
 
 
 def wall_types(host):
@@ -339,12 +326,13 @@ def move_room_to_redraw(main_room,redraw):
     if delta.GetLength()>1e-9: loc.Move(delta)
     return target
 
-def room_tag_ids_in_active_view(host,room):
-    # Capture tags before moving the Room, while association is still reliable.
+def room_tag_ids(host,room):
+    """The tags that point at a Room, in every view that has tags."""
     ids=[]
-    view=host.ActiveView
-    if view is None:return ids
-    tags=FilteredElementCollector(host,view.Id).OfCategory(BuiltInCategory.OST_RoomTags).WhereElementIsNotElementType().ToElements()
+    try:
+        tags=FilteredElementCollector(host).OfCategory(BuiltInCategory.OST_RoomTags).WhereElementIsNotElementType().ToElements()
+    except Exception:
+        return ids
     for tag in tags:
         matched=False
         try:
@@ -356,6 +344,59 @@ def room_tag_ids_in_active_view(host,room):
             except:pass
         if matched:ids.append(tag.Id)
     return ids
+
+def room_tag_templates(host):
+    """The views that carry Room Tags, and the tag type each of them uses.
+
+    A new stand's tag has to look like the tags already in the model, so both
+    the views and the types come from the tags that are already there.
+    """
+    templates={}
+    try:
+        tags=FilteredElementCollector(host).OfCategory(BuiltInCategory.OST_RoomTags).WhereElementIsNotElementType().ToElements()
+    except Exception:
+        return templates
+    for tag in tags:
+        try:
+            view_id=eidv(tag.OwnerViewId)
+            if view_id<0:continue
+            type_id=eidv(tag.GetTypeId())
+        except Exception:
+            continue
+        entry=templates.setdefault(view_id,{'type_id':None,'count':0})
+        entry['count']+=1
+        if entry['type_id'] is None:entry['type_id']=type_id
+    return templates
+
+def create_room_tags(host,room,templates,point,qa,label):
+    """Tag a Room the way the model already tags its stands.
+
+    One tag per view that already carries Room Tags, with the type that view
+    uses, on the Room's location point - where the moved tags are centred too.
+    With no Room Tags in the model at all, the active view gets one with the
+    default type. A view that refuses the tag is reported, not fatal.
+    """
+    views=sorted(templates)
+    if not views:
+        view=host.ActiveView
+        if view is not None:views=[eidv(view.Id)]
+    created=0;errors=[]
+    for view_id in views:
+        try:
+            tag=host.Create.NewRoomTag(LinkElementId(room.Id),UV(point.X,point.Y),ElementId(view_id))
+            if tag is None:
+                errors.append('view %d: Revit returned no tag'%view_id);continue
+            wanted=(templates.get(view_id) or {}).get('type_id')
+            if wanted is not None and eidv(tag.GetTypeId())!=wanted:
+                try:tag.ChangeTypeId(ElementId(wanted))
+                except Exception as ex:errors.append('view %d: the tag type could not be matched (%s)'%(view_id,ex))
+            created+=1
+        except Exception as ex:
+            errors.append('view %d: %s'%(view_id,ex))
+    if errors:
+        qa.append('%s: %d of %d room tag(s) could not be created (%s)'
+                  %(label,len(errors),len(views),'; '.join(errors)))
+    return created
 
 def centre_room_tags(host,tag_ids,target):
     moved=0;errors=[]
@@ -407,6 +448,47 @@ PREVIEW_BLUE = (0, 120, 255)
 PREVIEW_AMBER = (255, 150, 0)
 PREVIEW_RED = (220, 40, 40)
 PREVIEW_SKIPPED = (200, 0, 200)
+PREVIEW_COLOURS = (PREVIEW_BLUE, PREVIEW_AMBER, PREVIEW_RED, PREVIEW_SKIPPED)
+
+
+def preview_marker(view_id, wall_ids):
+    """The name (and comment) a preview band carries, so a later run can find
+    it again: the view it was drawn in and the walls it recoloured."""
+    return PREVIEW_MARK + ' v=%d w=%s' % (view_id, ','.join(str(w) for w in wall_ids))
+
+
+def parse_preview_marker(text):
+    """The view id and wall ids stored in a preview marker.
+
+    Older markers carried only the wall ids, so both may come back empty; the
+    override sweep then finds what the marker cannot name.
+    """
+    view = None
+    walls = []
+    for token in text.split():
+        if token.startswith('v='):
+            try:
+                view = int(token[2:])
+            except Exception:
+                pass
+        elif token.startswith('w='):
+            for part in token[2:].split(','):
+                if part.isdigit():
+                    walls.append(int(part))
+    return view, walls
+
+
+def override_is_preview(style):
+    """True when a view override paints in one of the preview colours."""
+    for rgb in PREVIEW_COLOURS:
+        for getter in ('SurfaceForegroundPatternColor', 'CutForegroundPatternColor'):
+            try:
+                colour = getattr(style, getter)
+                if colour.Red == rgb[0] and colour.Green == rgb[1] and colour.Blue == rgb[2]:
+                    return True
+            except Exception:
+                pass
+    return False
 
 
 def wall_points(curve):
@@ -737,38 +819,87 @@ def preview_height(main, gplan):
     return 0.02
 
 
-def clear_preview(host, view):
-    """Remove the preview left by an earlier run."""
-    removed = 0
+def clear_preview(host, qa):
+    """Remove the preview left by an earlier run, wherever it was drawn.
+
+    A band carries the marker in its name (and comment), so it is found even
+    when its colour override is gone. Then every view is swept for elements
+    that still paint in a preview colour: an unmarked band from an older run is
+    deleted, a recoloured wall is reset. Nothing can hide.
+
+    Returns {'elements': n, 'overrides': m}.
+    """
+    counts = {'elements': 0, 'overrides': 0}
+    marked = []
     try:
-        elements = FilteredElementCollector(host).OfCategory(BuiltInCategory.OST_GenericAnnotation) \
+        candidates = FilteredElementCollector(host).OfCategory(BuiltInCategory.OST_GenericAnnotation) \
             .WhereElementIsNotElementType().ToElements()
-    except Exception:
-        return 0
-    for element in elements:
+    except Exception as ex:
+        qa.append('PREVIEW: could not scan for the preview (%s)' % ex)
+        return counts
+    for element in candidates:
+        text = None
         try:
-            parameter = element.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
-            if parameter is None or parameter.StorageType != StorageType.String:
-                continue
-            text = parameter.AsString() or ''
-            if not text.startswith(PREVIEW_MARK):
-                continue
-            for token in text.replace('walls=', '').split(','):
-                token = token.strip()
-                if not token.isdigit():
-                    continue
-                try:
-                    wall = host.GetElement(ElementId(int(token)))
-                    if wall is not None:
-                        view.SetElementOverrides(wall.Id,
-                                                 view.GetCategoryOverrides(wall.Category.Id))
-                except Exception:
-                    pass
-            host.Delete(element.Id)
-            removed += 1
+            name = element.Name
+            if isinstance(name, str) and name.startswith(PREVIEW_MARK):
+                text = name
         except Exception:
             pass
-    return removed
+        if text is None:
+            try:
+                parameter = element.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+                if parameter is not None and parameter.StorageType == StorageType.String:
+                    value = parameter.AsString()
+                    if value and value.startswith(PREVIEW_MARK):
+                        text = value
+            except Exception:
+                pass
+        if text is not None:
+            marked.append(element.Id)
+    for element_id in marked:
+        try:
+            host.Delete(element_id)
+            counts['elements'] += 1
+        except Exception as ex:
+            qa.append('PREVIEW: could not delete a preview band (%s)' % ex)
+    try:
+        views = FilteredElementCollector(host).OfClass(View).ToElements()
+    except Exception as ex:
+        qa.append('PREVIEW: could not sweep the views for leftovers (%s)' % ex)
+        return counts
+    for view in views:
+        try:
+            overrides = view.GetElementOverrides()
+        except Exception:
+            continue
+        to_delete = []
+        to_reset = []
+        for element_id in list(overrides.Keys):
+            try:
+                if not override_is_preview(overrides[element_id]):
+                    continue
+                element = host.GetElement(element_id)
+            except Exception:
+                continue
+            if element is None:
+                continue
+            if isinstance(element, DirectShape):
+                to_delete.append(element_id)
+            else:
+                to_reset.append(element_id)
+        for element_id in to_delete:
+            try:
+                host.Delete(element_id)
+                counts['elements'] += 1
+            except Exception as ex:
+                qa.append('PREVIEW: could not delete a leftover band (%s)' % ex)
+        for element_id in to_reset:
+            try:
+                view.SetElementOverrides(element_id, OverrideGraphicSettings())
+                counts['overrides'] += 1
+            except Exception as ex:
+                qa.append('PREVIEW: could not reset an override (%s)' % ex)
+    return counts
 
 
 def draw_preview(host, view, bands, recolour, z, qa):
@@ -816,12 +947,17 @@ def draw_preview(host, view, bands, recolour, z, qa):
         except Exception as ex:
             qa.append('PREVIEW: could not recolour wall %s (%s)' % (element_id, ex))
     for shape, rgb in shapes:
+        marker = preview_marker(eidv(view.Id), coloured.get(rgb, []))
+        try:
+            shape.SetName(marker)
+        except Exception:
+            qa.append('PREVIEW: could not mark a preview element; it may need deleting by hand')
         try:
             comment = shape.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
             if comment is not None and comment.StorageType == StorageType.String:
-                comment.Set(PREVIEW_MARK + ' walls=' + ','.join(coloured.get(rgb, [])))
+                comment.Set(marker)
         except Exception:
-            qa.append('PREVIEW: could not mark a preview element; it may need deleting by hand')
+            pass
     return drawn, recoloured
 
 
@@ -1013,28 +1149,29 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
 
 
 qa=[];pout=[];gout=[];issues=[];summary={'Status':'FAILED'}
-lnk=None;link_type_id=None;cleanup=False
+rdoc=None;rdoc_closed=False
 try:
     if doc is None:raise Exception('No active Main document')
     folder=pv(iv(0));tol_m=float(iv(1,.01));sp_m=float(iv(2,.25))
     apply=bool(iv(3,False));redraw_wins=bool(iv(4,False))
     rvt,side=files(os.path.abspath(folder.strip()))
-    rvt_norm=os.path.normcase(rvt)
-    if doc.PathName and os.path.normcase(os.path.abspath(doc.PathName))==rvt_norm:
+    if same_path(doc.PathName,rvt):
         raise Exception('Active document is the Redraw. Open Main before running Compare and Update Redraw.')
     for open_doc in doc.Application.Documents:
         try: op=open_doc.PathName
         except: op=None
-        if op and os.path.normcase(os.path.abspath(op))==rvt_norm:
+        if same_path(op,rvt):
             raise Exception('Close the Redraw before running Compare and Update Redraw.')
     with open(side,'r',encoding='utf-8') as f:payload=json.load(f)
     loc=validate(payload,rvt,side,doc,qa,issues)
-    lnk,link_type_id=add_link(doc,rvt);cleanup=True;ldoc=lnk.GetLinkDocument()
-    qa.append('The Redraw link was reloaded, so the undo history before this run '
-              'is gone. The run\'s own changes can still be undone.')
-    if ldoc is None:raise Exception('Redraw link is unavailable')
+    rdoc=open_redraw(doc,rvt)
+    if rdoc is None:raise Exception('Redraw document is unavailable')
+    activate_main(doc,qa)
+    qa.append('The Redraw was read from its own document and is closed again at the end of '
+              'the run. Main was never linked to it, so the undo history is intact and one '
+              'Ctrl+Z puts Main back exactly where it was.')
     tol=UnitUtils.ConvertToInternalUnits(tol_m,UnitTypeId.Meters);sp=UnitUtils.ConvertToInternalUnits(sp_m,UnitTypeId.Meters)
-    b=bases(payload);m=collect(doc,None,qa,'Main',loc);r=collect(ldoc,lnk.GetTotalTransform(),qa,'Redraw',loc)
+    b=bases(payload);m=collect(doc,None,qa,'Main',loc);r=collect(rdoc,None,qa,'Redraw',loc)
 
     # ---- how every stand compares across baseline, Main and Redraw ----
     statuses={}
@@ -1047,8 +1184,11 @@ try:
     adjacency=adjacency_from_wall_usage(usage)
     components=find_components(sorted(set(b)|set(m)|set(r)),adjacency)
 
-    redraw_all=wall_records(list(collect_walls(ldoc,lnk.GetTotalTransform()).values()))
+    redraw_all=wall_records(list(collect_walls(rdoc,None).values()))
     gplan,pplan=plan_clusters(b,m,r,redraw_all,tol,sp,redraw_wins,qa,issues)
+    # The tag types and views the model already uses, read before anything is
+    # merged so a new stand's tags match what is there now.
+    tag_templates=room_tag_templates(doc)
 
     # ---- parameters, as before ----
     for n in sorted(set(b)|set(m)|set(r)):
@@ -1087,7 +1227,6 @@ try:
             bands.append((wall['ref']['curve'],PREVIEW_RED))
             recolour.append((wall['ref']['element_id'],PREVIEW_RED))
 
-    summary_link_removed='PENDING' if cleanup else 'NOT REQUIRED'
     preview_note=None
 
     if not apply:
@@ -1095,23 +1234,14 @@ try:
         for op in gplan:
             op.pop('_plan',None);op.pop('_rooms',None);op.pop('_level',None);op.pop('_want',None)
             op['status']='PLANNED';gout.append(op)
-        # The link goes first, so the preview is the last transaction and one
-        # Ctrl+Z takes the bands off the plan.
-        if cleanup and link_type_id is not None:
-            try:
-                remove_link_type(doc,link_type_id)
-                cleanup=False
-                summary_link_removed='YES'
-            except Exception as ex:
-                qa.append('LINK: could not remove the Redraw link: '+str(ex))
-        # Draw the visual diff so the plan can be checked on the plan. Creating
-        # the bands and recolouring the walls both modify the document, so
-        # they need a transaction.
+        # Draw the visual diff so the plan can be checked on the plan. The old
+        # preview goes in the same transaction, so one Ctrl+Z takes the whole
+        # preview off the plan.
         preview_tx=Transaction(doc,'Redraw Merge Preview')
         try:
             preview_tx.Start()
             view=doc.ActiveView
-            cleared=clear_preview(doc,view)
+            cleared=clear_preview(doc,qa)
             z=preview_height(m,gplan)
             drawn,recoloured=draw_preview(doc,view,bands,recolour,z,qa)
             preview_tx.Commit()
@@ -1123,32 +1253,44 @@ try:
                 recoloured))
             preview_note+=(' %d band(s) are magenta: those clusters are skipped.'
                            %sum(1 for b2 in bands if b2[1]==PREVIEW_SKIPPED))
-            if cleared:preview_note+=' Removed %d element(s) from an earlier preview.'%cleared
+            if cleared['elements'] or cleared['overrides']:
+                preview_note+=' Removed %d element(s) and %d override(s) from an earlier preview.'%(
+                    cleared['elements'],cleared['overrides'])
             qa.append(preview_note)
         except Exception as ex:
             try:preview_tx.RollBack()
             except Exception:pass
             preview_note='Preview could not be drawn: '+str(ex);qa.append(preview_note)
     else:
+        # The old preview goes in its own transaction *before* the merge, so a
+        # single Ctrl+Z undoes the merge and does not bring the bands back.
+        preview_tx=Transaction(doc,'Redraw Merge - Clear Preview')
+        try:
+            preview_tx.Start()
+            cleared=clear_preview(doc,qa)
+            preview_tx.Commit()
+            preview_note='Preview cleared: %d element(s) and %d override(s).'%(
+                cleared['elements'],cleared['overrides'])
+            qa.append(preview_note)
+        except Exception as ex:
+            try:preview_tx.RollBack()
+            except Exception:pass
+            preview_note='The old preview could not be cleared: '+str(ex);qa.append(preview_note)
         tx=Transaction(doc,'MVP2.4B6 - Merge Redraw Updates')
         try:
             tx.Start()
-            try:
-                clear_preview(doc,doc.ActiveView)
-            except Exception:
-                pass
             for op in gplan:
                 if op['status']!='PLANNED':continue
                 plan=op['_plan']
                 try:
-                    written=0;moved=0;tags=0
+                    written=0;moved=0;tags=0;added=0;gone=0
                     # Rooms the Redraw deleted go first. Removing a shared wall
                     # while both rooms still exist puts two rooms in one region,
                     # and Revit's answer to that is a modal warning that edits
                     # the document outside this transaction.
                     for action,number in op['_rooms']:
                         if action=='DELETE':
-                            doc.Delete(ElementId(m[number]['element_id']))
+                            doc.Delete(ElementId(m[number]['element_id']));gone+=1
                     doc.Regenerate()
                     for wall in plan['delete']:doc.Delete(ElementId(wall['ref']['element_id']))
                     for wall,redraw_wall in plan['replace']:doc.Delete(ElementId(wall['ref']['element_id']))
@@ -1173,26 +1315,40 @@ try:
                             level=find_level_by_name(doc,redraw_state.get('level_name'))
                             if level is None:raise Exception('Level not found in Main: '+str(redraw_state.get('level_name')))
                             room,params=create_room(doc,level,redraw_state,number,values)
-                            written+=len(params)
+                            written+=len(params);added+=1
+                            missing=[pn for pn in PARAMS if pn not in values]
+                            if missing:
+                                qa.append('Stand %s: %d of the 6 merged parameters are blank in the '
+                                          'Redraw and were not written (%s)'
+                                          %(number,len(missing),', '.join(missing)))
+                            point=None
+                            try:
+                                if isinstance(room.Location,LocationPoint):point=room.Location.Point
+                            except Exception:
+                                point=None
+                            if point is None:
+                                point=redraw_state.get('room_point') or redraw_state.get('centroid')
+                            if point is not None:
+                                tags+=create_room_tags(doc,room,tag_templates,point,qa,'Stand '+number)
+                            else:
+                                qa.append('Stand %s: no location point, so no room tag was created'%number)
                         elif action=='MOVE':
                             room=m[number]['room']
-                            tag_ids=room_tag_ids_in_active_view(doc,room)
+                            tag_ids=room_tag_ids(doc,room)
                             target=move_room_to_redraw(room,r[number])
                             moved+=1
                             tmoved,tag_errors=centre_room_tags(doc,tag_ids,target)
                             tags+=tmoved
                     op['params_written']=written;op['rooms_moved']=moved;op['tags_moved']=tags
+                    op['rooms_created']=added;op['rooms_deleted']=gone
                     op['status']='APPLIED'
+                    qa.append('CLUSTER %s applied: %d wall(s) deleted, %d created, %d kept; '
+                              '%d room(s) moved, %d created, %d deleted; %d tag(s) moved or created; '
+                              '%d parameter(s) written'
+                              %(op['cluster'],len(plan['delete']),len(plan['create']),len(plan['keep']),
+                                moved,added,gone,tags,written))
                 except Exception as e:
                     op['status']='FAILED';op['reason']=str(e)
-            # The Redraw link goes inside the same transaction as the merge, so
-            # one undo takes the whole thing back.
-            try:
-                remove_link_type(doc,link_type_id,True)
-                cleanup=False
-                summary_link_removed='YES'
-            except Exception as e:
-                qa.append('LINK: could not remove the Redraw link in the merge transaction: '+str(e))
             for op in pplan:
                 p=m[op['stand']]['room'].LookupParameter(op['parameter'])
                 if p is None:op['status']='SKIPPED';op['reason']='Parameter not found in Main'
@@ -1231,8 +1387,9 @@ try:
                 op['status']='VERIFIED' if after==op['_target'] else 'VERIFY_FAILED'
                 if op['status']!='VERIFIED':op['reason']='Main value does not match Redraw after update'
             op.pop('_target',None);pout.append(op)
-    # An apply removes the link inside the merge transaction, so one undo
-    # takes the whole merge back. A dry run removed it before the preview.
+    # The merge is the only transaction that edits Main, so one Ctrl+Z puts
+    # Main back exactly where it was. The preview cleanup runs before it, in
+    # its own transaction, so undoing the merge does not bring the bands back.
 
     # ---- the audit trail ----
     try:
@@ -1268,14 +1425,15 @@ try:
              'Clusters':sum(1 for x in gout if x['status'] in ('PLANNED','VERIFIED')),
              'Parameters':sum(1 for x in pout if x['status'] in ('PLANNED','VERIFIED')),
              'Geometry':sum(1 for x in gout if x['status'] in ('PLANNED','VERIFIED')),
+             'Rooms created':sum(x.get('rooms_created',0) for x in gout),
              'Skipped':sum(1 for x in pout+gout if x['status']=='SKIPPED'),
              'Errors':hard_fail,
              'Conflicts':sum(1 for x in issues if 'CONFLICT' in x.get('type','')),
-             'Redraw link removed':summary_link_removed,
+             'Redraw document closed':'YES' if rdoc_closed else 'NO',
              'Preview':preview_note if preview_note else ('not drawn in apply mode'
                                                           if apply else 'NOT DRAWN'),
              'Undo':('ONE STEP - MVP2.4B6 - Merge Redraw Updates'
-                     if apply else 'NOT REQUIRED')}
+                     if apply else 'ONE STEP - Redraw Merge Preview' if preview_note else 'NOT REQUIRED')}
 except Exception as e:
     # Put the reason in the summary as well as the QA list: the summary is the
     # watch that is always visible.
@@ -1284,12 +1442,12 @@ except Exception as e:
     qa.append('FATAL: '+str(e));qa.append(detail)
     summary['Status']='FAILED';summary['Error']=str(e);summary['Trace']=detail
 finally:
-    # Emergency cleanup only. Normal cleanup happens before Main is edited.
-    if cleanup and link_type_id is not None:
-        try:
-            remove_link_type(doc,link_type_id)
-            summary['Redraw link removed']='YES'
-        except Exception as e:
-            qa.append('CLEANUP FAILED: '+str(e));summary['Redraw link removed']='NO'
+    # The Redraw document is closed whatever happened, and Main is brought back
+    # to the foreground.
+    if rdoc is not None:
+        rdoc_closed=close_redraw(doc,rdoc,qa)
+        summary['Redraw document closed']='YES' if rdoc_closed else 'NO'
+    else:
+        summary['Redraw document closed']='NOT OPENED'
 
 OUT=summary,pout,gout,issues,qa

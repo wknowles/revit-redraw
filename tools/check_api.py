@@ -41,7 +41,7 @@ FOREIGN = {
 }
 
 # .NET members that are not part of the Revit API.
-DOTNET = {'GetType', 'ToString', 'Equals', 'GetHashCode', 'Dispose'}
+DOTNET = {'GetType', 'ToString', 'Equals', 'GetHashCode', 'Dispose', 'Keys'}
 
 
 def sources():
