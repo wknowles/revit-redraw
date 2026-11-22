@@ -162,6 +162,35 @@ still loads/removes the link.
 
 ## 4. Decisions and rationale (business + technical)
 
+### The merge unit is a wall, not a room
+
+The rebuild in `src/` changes the unit of comparison from a Room to a **Wall**.
+
+Today a stand is compared and rebuilt as a monolith: if the stand changed, its
+entire boundary is deleted and recreated. That is why only an **isolated**
+stand can merge — a shared wall cannot be half-rebuilt — and why a stand that
+merely grew loses the doors and joins on the walls that did not move.
+
+Comparing walls instead:
+
+- a Main wall that already sits where a Redraw wall sits is **kept**;
+- a Main wall with no Redraw counterpart is **deleted**, but only if no stand
+  outside the current change still needs it;
+- a Redraw wall with no Main counterpart is **created**;
+- a wall shared by two stands is **one wall**, matched once, so a cluster of
+  connected stands merges as one change.
+
+**Clusters need no separate algorithm.** If a shared wall moves in the Redraw,
+both neighbours' boundaries change, so the set of stands whose Redraw differs
+from the baseline is already closed over shared walls — it *is* the cluster.
+The one exception is deletion, handled by the "only delete if every stand that
+binds it is in the change set" rule.
+
+`src/merge_core.py` holds this logic as pure Python, so it is unit tested
+offline. Straight walls are matched by their ends, which is exact and O(1).
+
+### Other decisions
+
 - **Always save/sync Main first** — the Redraw must contain the operator's latest
   work; the old optional boolean was misleading and is gone.
 - **Detached, non-workshared Redraw** — designers edit without worksharing overhead;

@@ -1,12 +1,44 @@
 # Changelog
 
-## 2026-11-22 — Revit 2027 API audit; four live bugs fixed
+## 2026-11-22 — Phase 0 answered; merge core built; four live bugs fixed
 
+- **All four Phase 0 questions are answered**, on a test model and on a live
+  production model:
+  - **A** `View.SetElementOverrides(ElementId, OverrideGraphicSettings)` with
+    `SetCutForegroundPatternColor` **does** recolour an existing wall in a
+    floor plan, and reads clearly.
+  - **B** a `GeometryCreationUtilities.CreateExtrusionGeometry` band in
+    `Generic Annotations`, coloured with the same override, **renders filled**
+    in a floor plan — not as an outline.
+  - **C** a Room's `Number` is writable three ways: the `SpatialElement.Number`
+    property (it has a setter), `LookupParameter('Number')` and
+    `BuiltInParameter.ROOM_NUMBER`.
+  - **D** room boundary curves are **not** trimmed to the room:
+    `BoundarySegment.GetCurve()` returns the full wall location curve, and a
+    wall shared by two rooms carries the identical curve in both rooms' segment
+    lists. So baseline curves can be compared with Main's wall curves exactly,
+    and a shared wall de-duplicates by curve.
+- Because the override recolours the *existing* wall, the preview needs no
+  geometry for the "Main changed" and "conflict" halves — only the Redraw's new
+  positions need a band.
+- Added `src/`, the rebuilt merge logic:
+  - `src/graph2.py` is the source of truth for the Python inside
+    `2. Compare and Update Redraw.dyn`. `src/build_graph2.py` injects it into
+    the graph and leaves the node layout alone, so the graph stays diffable.
+  - `src/merge_core.py` is the **pure Python** wall matching and clustering
+    engine — no Revit imports, so it is unit tested offline by
+    `src/test_merge_core.py` (16 tests). It covers curve distance, wall
+    matching (unchanged, moved, added, removed, one-to-one, long moves),
+    shared-wall detection and cluster grouping.
+  - Straight walls are compared by their ends, which is exact and O(1):
+    matching 2000 walls went from 6.9 s to 0.01 s.
+  - Graph 2 gained a fifth input, `Redraw Wins On Conflicts` (default false).
 - Added `tools/`, the repository's static checks. `python3 tools/check_repo.py`
   runs them all:
   - the `.dyn` files are valid CRLF JSON with compiling embedded Python;
-  - the generated phase 0 graph matches `phase0/phase0_probe.py`;
+  - the generated graphs match their sources;
   - the phase 0 probe survives its stubbed Revit models;
+  - the merge core passes its unit tests;
   - **every Revit API call in the repository matches the Revit 2027
     documentation**. `tools/revit_api_2027.json` is a cached index of the
     documented API, refreshed with `python3 tools/build_api_index.py`.
@@ -21,78 +53,26 @@
     Graph 1 wrote `phase_created` and `phase_demolished` as always null. It now
     uses `Element.CreatedPhaseId` / `Element.DemolishedPhaseId`.
   - **`Room.IsPlaced` does not exist in Revit 2027.** Graph 1 was already
-    falling back to the location-point check; that fallback is now the code,
-    not an exception handler.
+    falling back to the location-point check; that fallback is now the code.
   - **`ElementId.IntegerValue` was removed** in Revit 2024+. The dead fallback
     in all three files is gone; `ElementId.Value` is used directly.
 - The phase 0 probe also used **`BuiltInCategory.OST_GenericAnnotations`**, which
-  does not exist in Revit 2027 - the category is `OST_GenericAnnotation`
-  (singular) - and **`Extrusion.Create`**, which was replaced by
+  does not exist in Revit 2027 — the category is `OST_GenericAnnotation`
+  (singular) — and **`Extrusion.Create`**, which was replaced by
   `GeometryCreationUtilities.CreateExtrusionGeometry`.
 - Confirmed API facts from the Revit 2027 documentation and live Revit runs,
   now recorded in `DESIGN.md`:
   - **`Room.IsPlaced` does not exist in Revit 2027.** `SpatialElement` exposes
-    only `Area`, `Level`, `LevelId`, `Location` and `Number`. Graph 1 derives
-    `placement_status` from `room.Location` being a `LocationPoint`, and
-    `has_geometry` from whether boundary segments are actually returned.
-  - **Room boundary curves are NOT trimmed to the room.**
-    `BoundarySegment.GetCurve()` returns the full wall location curve, and a
-    wall shared by two rooms appears with the identical curve in both rooms'
-    segment lists. Baseline curves can therefore be compared with Main's wall
-    curves exactly, and a shared wall de-duplicates by curve.
-  - `SpatialElement.Number` **has a setter**, so a Room's number can be written
-    directly as well as through its parameter. Both were confirmed writable in
-    Revit 2027, which unblocks creating an added stand. Revit also auto-numbers
-    a new room from the sequence, so an added stand must set its Number.
+    only `Area`, `Level`, `LevelId`, `Location` and `Number`.
   - `SpatialElement.Location` is get-only; the location point is moved with
     `Location.Move`.
-  - `Document.Create.NewRoom` takes a `UV`, not an `XYZ`.
-  - `XYZ` has **no `Length` property** - use `GetLength()`; its operators are
+  - `Document.Create.NewRoom` takes a `UV`, not an `XYZ`. Revit **auto-numbers**
+    a new room from the sequence, so an added stand must set its Number.
+  - `XYZ` has **no `Length` property** — use `GetLength()`; its operators are
     not dependable from PythonNet.
-  - `View.SetElementOverrides(ElementId, OverrideGraphicSettings)` applies a
-    graphics override to a single element in a view.
   - `RevisionCloud.Create` takes the Revision id, so a revision cloud's colour
     comes from its revision and cannot be varied per cloud.
 - Added `phase0/`, a diagnostic tool that is **not** part of the 1 → 2 workflow.
-  It answers the runtime questions the Revit API documentation cannot answer
-  before graph 2 is rebuilt around wall-level matching and a visual preview:
-  - **A** does a per-element view override (`View.SetElementOverrides`)
-    recolour an existing wall in a floor plan?
-  - **B** do DirectShape surfaces render in a floor plan, and does
-    `SetElementOverrides` accept a DirectShape?
-  - **C** is a Room's `Number` writable (needed to create an added stand)?
-  - **D** are room boundary curves trimmed to the room, or the full wall curve?
-- `phase0/phase0_probe.py` is the source of truth; `phase0/Phase 0 Prototype.dyn`
-  is generated from it by `python3 phase0/build_dyn.py` and verified with
-  `python3 phase0/build_dyn.py --check`. The generated graph is CRLF JSON with
-  the Python stored as escaped `\r\n`, like the two workflow graphs.
-- The probe is safe by default: all diagnostics run inside a transaction that is
-  rolled back. The optional visible test commits one transaction and is undone
-  with a single Ctrl+Z; a later run also clears the previous probe elements.
-- **Probe hardened after the first run.** The first version aborted everything
-  when it found no wall-bounded room, and swallowed the reason. It now:
-  - inventories every room's boundary at **both** `Center` and `Finish` and
-    reports what the boundary is made of (Walls, Room Separation Lines, other),
-    so a model bounded by separation lines is diagnosed instead of silently
-    returning nothing;
-  - keeps going when there is no wall, so questions A, C and E still run;
-  - no longer leaves `shape` unbound when DirectShape creation fails;
-  - no longer relies on `Room.IsPlaced`, which does not exist in Revit 2027;
-  - builds the highlight band with plain float arithmetic, because RevitAPI's
-    `XYZ` has no `Length` property and its operators are not dependable from
-    PythonNet;
-  - uses `GeometryCreationUtilities.CreateExtrusionGeometry`, the API that
-    actually exists in Revit 2027.
-- Added `phase0/test_probe.py`, an offline harness that stubs the Revit API and
-  drives the probe through wall-bounded, non-wall-bounded, unplaced and empty
-  models. Its mock matches Revit 2027 exactly - no `IsPlaced`, no `XYZ.Length`,
-  no XYZ operators, writable `Number` - because a permissive mock hid three
-  real API bugs in the probe. It checks the probe's control flow only, not
-  whether an API call is correct against Revit.
-- Docs updated (`AGENTS.md`, `DESIGN.md`, `phase0/README.md`). Questions **A**
-  and **B** are still open - they need the visible test on a model with real
-  walls.
-
 ## 2026-11-21 — Centerline boundaries, clean names, Main-active workflow
 
 - **Graph 1 boundary extraction** now uses `SpatialElementBoundaryLocation.Center`

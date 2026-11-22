@@ -22,13 +22,19 @@ existing room, and whether the API calls used by the preview exist at all.
 
 | | Question | Answer |
 |---|---|---|
-| **C** | Is a Room's `Number` writable? | **Yes**, all three ways: `room.Number = '...'` (the property has a setter), `LookupParameter('Number').Set(...)` and `BuiltInParameter.ROOM_NUMBER`. Confirmed in Revit 2027. |
-| **D** | Are room boundary curves trimmed to the room? | **No.** `BoundarySegment.GetCurve()` returns the **full wall location curve** — for a wall shared by two rooms both rooms carry the identical curve. Confirmed in Revit 2027: segment length equals wall length and the endpoints match. |
-| **A** | Are graphics overrides allowed in the view? | `AreGraphicsOverridesAllowed` returns **True**. Whether the wall visibly changes colour is still open. |
-| **E** | `NewRoom` inside an existing room | Succeeds. The new room picks up a boundary and Revit **auto-numbers** it from the sequence (`A05` after `A01`-`A04`). An added stand must have its Number set explicitly. |
+| **A** | Does a per-element view override recolour an existing wall in a floor plan? | **Yes.** `View.SetElementOverrides(ElementId, OverrideGraphicSettings)` with `SetCutForegroundPatternColor` turns the wall green in the plan, and it reads clearly. Confirmed on a test model and on a live production model. |
+| **B** | Do DirectShape surfaces render in a floor plan? | **Yes — and they render filled.** A `GeometryCreationUtilities.CreateExtrusionGeometry` band in `Generic Annotations`, coloured with the same per-element override, shows as a solid filled band, not an outline. |
+| **C** | Is a Room's `Number` writable? | **Yes**, all three ways: `room.Number = '...'` (the property has a setter), `LookupParameter('Number').Set(...)` and `BuiltInParameter.ROOM_NUMBER`. |
+| **D** | Are room boundary curves trimmed to the room? | **No.** `BoundarySegment.GetCurve()` returns the **full wall location curve** — for a wall shared by two rooms both rooms carry the identical curve. Segment length equals wall length and the endpoints match. |
 
-Still open: **A** (does the wall visibly recolour) and **B** (does the DirectShape
-band render). Both need the visible test on a model with **real walls**.
+All four are settled. The preview design is confirmed:
+- **Blue** = the Redraw's new wall positions, drawn as a filled `DirectShape` band.
+- **Red / Amber** = the existing Main walls, recoloured in place with
+  `View.SetElementOverrides` — no temporary geometry at all for that half.
+
+Because the override colours the *existing* wall, the "Main changed" and
+"conflict" highlights need no geometry: they are the walls themselves. Only
+the Redraw's new positions need a band.
 
 ## Running it
 

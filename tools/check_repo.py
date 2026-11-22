@@ -86,8 +86,12 @@ def main():
 
     failures.extend(run('phase0 graph matches phase0_probe.py',
                         [PYTHON, os.path.join(ROOT, 'phase0', 'build_dyn.py'), '--check']))
+    failures.extend(run('graph 2 matches src/',
+                        [PYTHON, os.path.join(ROOT, 'src', 'build_graph2.py'), '--check']))
     failures.extend(run('phase0 probe survives its stubbed models',
                         [PYTHON, os.path.join(ROOT, 'phase0', 'test_probe.py')]))
+    failures.extend(run('merge core unit tests',
+                        [PYTHON, os.path.join(ROOT, 'src', 'test_merge_core.py')]))
     failures.extend(run('Revit API usage matches the 2027 documentation',
                         [PYTHON, os.path.join(HERE, 'check_api.py')]))
 
