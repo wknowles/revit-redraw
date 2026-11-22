@@ -82,6 +82,30 @@
 - Because the override recolours the *existing* wall, the preview needs no
   geometry for the "Main changed" and "conflict" halves — only the Redraw's new
   positions need a band.
+- Fixed the problems the first live run of the rebuilt graph 2 found:
+  - **The removed rooms are now deleted before the walls.** Deleting a shared
+    wall while both rooms still exist puts two rooms in one region, and Revit
+    answers that with a modal warning; clicking "Delete Room" in it edits the
+    document outside the merge's transaction, which broke the run with
+    "Modification of the document is forbidden".
+  - **No regeneration after the commit.** Committing regenerates by itself,
+    and regenerating outside a transaction is refused once anything else has
+    touched the document.
+  - **The plan now sees the Redraw's walls that no longer bound a room.**
+    Deleting a stand in the Redraw leaves its walls behind as orphans. The
+    plan only looked at walls that bound a room, so those orphans looked
+    deleted and would have been taken out of Main - a wall the designer kept
+    would have been destroyed. The Redraw's walls are now inventoried, and any
+    that match a baseline wall of the cluster count as part of it.
+  - **The preview bands every wall the merge touches**, not only the Redraw's
+    new positions, so it is visible even where recolouring a wall does not
+    take. It also reports how many bands it drew and how many walls it
+    recoloured, and any failure, instead of counting what it planned to do.
+- `src/test_graph2_plan.py` grew to 12 tests, including the reported case: a
+  separating wall removed in the Redraw with one of the two stands deleted.
+  Two more bugs came out of it - the Redraw's wall inventory could add a wall
+  twice, and a stand level conflict was not overridden by "Redraw wins".
+
 - Added `src/`, the rebuilt merge logic:
   - `src/graph2.py` is the source of truth for the Python inside
     `2. Compare and Update Redraw.dyn`. `src/build_graph2.py` injects it into

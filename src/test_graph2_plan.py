@@ -7,6 +7,9 @@ Drives plan_clusters() with stand, wall and curve fakes, so the glue between
 the Revit data and the merge core is exercised without Revit. The fakes are
 deliberately thin: they only have to behave enough like the Revit API for the
 geometry helpers.
+
+A wall shared by two stands has the same element id in both, the way Revit
+does it, so the clustering can find it.
 """
 import os
 import sys
@@ -108,11 +111,10 @@ def descriptor(element_id, curve, wall_type='Closed Wall - RX'):
             'offset': 0.0, 'flipped': False, 'element_id': element_id, 'curve': curve}
 
 
-def stand(number, curves, element_id=None, level_name='Level 1'):
-    """A stand with one wall per boundary curve."""
-    walls = []
-    for index, curve in enumerate(curves):
-        walls.append(descriptor((element_id or 1) * 1000 + index, curve))
+def stand(number, walls, element_id=None, level_name='Level 1'):
+    """A stand. `walls` is a list of (element_id, curve) pairs."""
+    descriptors = [descriptor(wall_id, curve) for wall_id, curve in walls]
+    curves = [curve for _, curve in walls]
     xs = [c.a[0] for c in curves] + [c.b[0] for c in curves]
     ys = [c.a[1] for c in curves] + [c.b[1] for c in curves]
     centre = Point((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
@@ -123,8 +125,8 @@ def stand(number, curves, element_id=None, level_name='Level 1'):
         'level_id': 1,
         'level_name': level_name,
         'loops': [list(curves)],
-        'wall_loops': [walls],
-        'boundary_ids': [w['element_id'] for w in walls],
+        'wall_loops': [descriptors],
+        'boundary_ids': [w['element_id'] for w in descriptors],
         'centroid': centre,
         'room_point': centre,
         'has_geometry': True,
@@ -140,9 +142,10 @@ def check(condition, message):
         FAILURES.append(message)
 
 
-def plan(base, main, redraw, redraw_wins=False):
+def plan(base, main, redraw, redraw_wins=False, redraw_walls=None):
     issues = []
-    gplan, pplan = graph2.plan_clusters(base, main, redraw, 0.03, 0.25, redraw_wins, [], issues)
+    gplan, pplan = graph2.plan_clusters(base, main, redraw, redraw_walls or [],
+                                        0.03, 0.25, redraw_wins, [], issues)
     return gplan, pplan, issues
 
 
@@ -150,10 +153,10 @@ def plan(base, main, redraw, redraw_wins=False):
 def test_two_isolated_stands_one_moves():
     wall_a = Curve(0, 0, 10, 0)
     wall_b = Curve(0, 10, 10, 10)
-    base = {'A': stand('A', [wall_a], 1), 'B': stand('B', [wall_b], 2)}
+    base = {'A': stand('A', [(11, wall_a)], 1), 'B': stand('B', [(21, wall_b)], 2)}
     main = dict(base)
     moved = Curve(0, 20, 10, 20)
-    redraw = {'A': stand('A', [moved], 1), 'B': stand('B', [wall_b], 2)}
+    redraw = {'A': stand('A', [(11, moved)], 1), 'B': stand('B', [(21, wall_b)], 2)}
     gplan, pplan, issues = plan(base, main, redraw)
     check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
     check(gplan[0]['status'] == 'PLANNED', 'it should be planned')
@@ -163,8 +166,7 @@ def test_two_isolated_stands_one_moves():
 
 
 def test_unchanged_model_plans_nothing():
-    wall_a = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [wall_a], 1)}
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
     gplan, pplan, issues = plan(base, dict(base), dict(base))
     check(gplan == [], 'nothing should be planned, got %s' % gplan)
 
@@ -173,10 +175,12 @@ def test_shared_wall_is_one_change():
     """Two stands that share a wall, one of them changes."""
     shared = Curve(10, 0, 10, 10)
     left = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [shared, left], 1), 'B': stand('B', [shared], 2)}
+    base = {'A': stand('A', [(10, shared), (11, left)], 1),
+            'B': stand('B', [(10, shared)], 2)}
     main = dict(base)
     moved_left = Curve(0, -2, 10, -2)
-    redraw = {'A': stand('A', [shared, moved_left], 1), 'B': stand('B', [shared], 2)}
+    redraw = {'A': stand('A', [(10, shared), (12, moved_left)], 1),
+              'B': stand('B', [(10, shared)], 2)}
     gplan, pplan, issues = plan(base, main, redraw)
     check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
     check(gplan[0]['walls_created'] == 1, 'one new wall should be created')
@@ -186,10 +190,10 @@ def test_shared_wall_is_one_change():
 
 def test_added_stand_is_planned():
     wall_a = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [wall_a], 1)}
+    base = {'A': stand('A', [(11, wall_a)], 1)}
     main = dict(base)
-    new_wall = Curve(20, 0, 30, 0)
-    redraw = {'A': stand('A', [wall_a], 1), 'B': stand('B', [new_wall], 2)}
+    redraw = {'A': stand('A', [(11, wall_a)], 1),
+              'B': stand('B', [(21, Curve(20, 0, 30, 0))], 2)}
     gplan, pplan, issues = plan(base, main, redraw)
     check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
     rooms = gplan[0]['_rooms']
@@ -199,20 +203,62 @@ def test_added_stand_is_planned():
 
 def test_removed_stand_is_planned():
     wall_a = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [wall_a], 1), 'B': stand('B', [Curve(20, 0, 30, 0)], 2)}
+    base = {'A': stand('A', [(11, wall_a)], 1),
+            'B': stand('B', [(21, Curve(20, 0, 30, 0))], 2)}
     main = dict(base)
-    redraw = {'A': stand('A', [wall_a], 1)}
+    redraw = {'A': stand('A', [(11, wall_a)], 1)}
     gplan, pplan, issues = plan(base, main, redraw)
     check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
     rooms = gplan[0]['_rooms']
     check(('DELETE', 'B') in rooms, 'the removed stand should be deleted, got %s' % rooms)
 
 
+def test_removed_stand_keeps_the_walls_that_survived():
+    """The reported case: the separating wall was removed in the Redraw and
+    room A02 was deleted. A02's own outer wall survives in the Redraw as an
+    orphan - it no longer bounds a room - so it must not be taken out of Main.
+    Only the wall that was really removed goes."""
+    shared = Curve(10, 0, 10, 10)
+    a01_outer = Curve(20, 0, 20, 10)
+    a02_outer = Curve(20, 10, 20, 20)
+    base = {'A01': stand('A01', [(10, shared), (11, a01_outer)], 1),
+            'A02': stand('A02', [(10, shared), (12, a02_outer)], 2)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(11, a01_outer)], 1)}    # the shared wall is gone
+    # the Redraw still has both outer walls; A02's no longer bounds a room
+    redraw_walls = graph2.wall_records([descriptor(11, a01_outer),
+                                         descriptor(12, a02_outer)])
+    gplan, pplan, issues = plan(base, main, redraw, redraw_walls=redraw_walls)
+    check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
+    check(gplan[0]['status'] == 'PLANNED', 'it should be planned')
+    check(gplan[0]['walls_deleted'] == 1,
+          'only the wall that was removed should be deleted, got %d'
+          % gplan[0]['walls_deleted'])
+    check(gplan[0]['walls_kept'] == 2,
+          'the walls that survived should be kept, got %d' % gplan[0]['walls_kept'])
+    rooms = gplan[0]['_rooms']
+    check(('DELETE', 'A02') in rooms, 'the deleted stand should be removed, got %s' % rooms)
+
+
+def test_removed_stand_without_the_inventory_loses_its_walls():
+    """Without the Redraw's wall inventory the surviving walls look deleted."""
+    shared = Curve(10, 0, 10, 10)
+    a01_outer = Curve(20, 0, 20, 10)
+    a02_outer = Curve(20, 10, 20, 20)
+    base = {'A01': stand('A01', [(10, shared), (11, a01_outer)], 1),
+            'A02': stand('A02', [(10, shared), (12, a02_outer)], 2)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(11, a01_outer)], 1)}
+    gplan, pplan, issues = plan(base, main, redraw)      # no inventory
+    check(gplan[0]['walls_deleted'] == 2,
+          'without the inventory both of A02 walls look deleted, got %d'
+          % gplan[0]['walls_deleted'])
+
+
 def test_conflict_blocks_the_cluster():
-    wall_a = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [wall_a], 1)}
-    main = {'A': stand('A', [Curve(0, 5, 10, 5)], 1)}     # Main moved it
-    redraw = {'A': stand('A', [Curve(0, 9, 10, 9)], 1)}   # the Redraw moved it too
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = {'A': stand('A', [(11, Curve(0, 5, 10, 5))], 1)}     # Main moved it
+    redraw = {'A': stand('A', [(11, Curve(0, 9, 10, 9))], 1)}   # the Redraw moved it too
     gplan, pplan, issues = plan(base, main, redraw)
     check(len(gplan) == 1, 'the cluster should be reported, got %d' % len(gplan))
     check(gplan[0]['status'] == 'SKIPPED', 'it should be skipped')
@@ -220,10 +266,9 @@ def test_conflict_blocks_the_cluster():
 
 
 def test_redraw_wins_overrides_a_conflict():
-    wall_a = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [wall_a], 1)}
-    main = {'A': stand('A', [Curve(0, 5, 10, 5)], 1)}
-    redraw = {'A': stand('A', [Curve(0, 9, 10, 9)], 1)}
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = {'A': stand('A', [(11, Curve(0, 5, 10, 5))], 1)}
+    redraw = {'A': stand('A', [(11, Curve(0, 9, 10, 9))], 1)}
     gplan, pplan, issues = plan(base, main, redraw, redraw_wins=True)
     check(len(gplan) == 1, 'the cluster should be reported, got %d' % len(gplan))
     check(gplan[0]['status'] == 'PLANNED', 'it should be planned when the Redraw wins')
@@ -232,10 +277,9 @@ def test_redraw_wins_overrides_a_conflict():
 
 
 def test_redraw_wins_still_blocks_an_unsupported_wall_type():
-    wall_a = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [wall_a], 1)}
-    main = {'A': stand('A', [Curve(0, 5, 10, 5)], 1)}
-    redraw = {'A': stand('A', [Curve(0, 9, 10, 9)], 1)}
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = {'A': stand('A', [(11, Curve(0, 5, 10, 5))], 1)}
+    redraw = {'A': stand('A', [(11, Curve(0, 9, 10, 9))], 1)}
     redraw['A']['wall_loops'][0][0]['type'] = 'Basic'
     gplan, pplan, issues = plan(base, main, redraw, redraw_wins=True)
     check(gplan[0]['status'] == 'SKIPPED',
@@ -243,11 +287,9 @@ def test_redraw_wins_still_blocks_an_unsupported_wall_type():
 
 
 def test_unsupported_wall_type_blocks_the_cluster():
-    wall_a = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [wall_a], 1)}
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
     main = dict(base)
-    redraw = {'A': stand('A', [Curve(0, 9, 10, 9)], 1)}
-    # the Redraw's wall is not an RX type
+    redraw = {'A': stand('A', [(11, Curve(0, 9, 10, 9))], 1)}
     redraw['A']['wall_loops'][0][0]['type'] = 'Basic'
     gplan, pplan, issues = plan(base, main, redraw)
     check(gplan[0]['status'] == 'SKIPPED', 'a non RX wall should block the cluster')
@@ -256,11 +298,9 @@ def test_unsupported_wall_type_blocks_the_cluster():
 
 
 def test_boundary_that_is_not_walls_blocks_the_cluster():
-    wall_a = Curve(0, 0, 10, 0)
-    base = {'A': stand('A', [wall_a], 1)}
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
     main = dict(base)
-    redraw = {'A': stand('A', [Curve(0, 9, 10, 9)], 1)}
-    # a boundary curve with no wall behind it
+    redraw = {'A': stand('A', [(11, Curve(0, 9, 10, 9))], 1)}
     redraw['A']['loops'][0].append(Curve(10, 0, 10, 10))
     gplan, pplan, issues = plan(base, main, redraw)
     check(gplan[0]['status'] == 'SKIPPED', 'a boundary that is not walls should block')

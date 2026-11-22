@@ -439,6 +439,50 @@ def state_walls(state):
     return out
 
 
+def collect_walls(doc, tr=None):
+    """Every wall in a document, not only the ones that bound a room.
+
+    Deleting a stand in the Redraw leaves its walls behind as orphans: they
+    are still walls, they simply no longer bound a room. Without this the
+    merge would think the Redraw deleted them and take them out of Main.
+    """
+    out = {}
+    try:
+        walls = FilteredElementCollector(doc).OfClass(Wall).ToElements()
+    except Exception:
+        return out
+    for wall in walls:
+        try:
+            location = wall.Location
+            curve = location.Curve if isinstance(location, LocationCurve) else None
+            if curve is None:
+                continue
+            if tr is not None:
+                curve = curve.CreateTransformed(tr)
+            height = None
+            offset = 0.0
+            try:
+                height = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM).AsDouble()
+            except Exception:
+                pass
+            try:
+                offset = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET).AsDouble()
+            except Exception:
+                pass
+            try:
+                wall_type = doc.GetElement(wall.GetTypeId())
+                type_name = wall_type.Name if wall_type else None
+            except Exception:
+                type_name = None
+            out[eidv(wall.Id)] = {'type': type_name, 'type_id': None,
+                                  'level_id': eidv(wall.LevelId), 'height': height,
+                                  'offset': offset, 'flipped': bool(wall.Flipped),
+                                  'element_id': eidv(wall.Id), 'curve': curve}
+        except Exception:
+            continue
+    return out
+
+
 def state_wall_usage(states, prefix):
     """wall -> the stands that use it, for one document.
 
@@ -663,17 +707,22 @@ def clear_preview(host, view):
 def draw_preview(host, view, bands, recolour, z, qa):
     """Draw the visual diff on the plan.
 
-    `bands` is a list of (curve, rgb) for the Redraw's new wall positions.
-    `recolour` is a list of (element_id, rgb) for the existing Main walls.
+    `bands` is a list of (curve, rgb) for the wall positions to mark.
+    `recolour` is a list of (element_id, rgb) for the existing Main walls,
+    which are recoloured in place as well as banded.
+
+    Returns (bands drawn, walls recoloured).
     """
     drawn = 0
+    recoloured = 0
     shapes = []
     category = ElementId(BuiltInCategory.OST_GenericAnnotation)
     by_colour = {}
     for curve, rgb in bands:
         try:
             solid = band_solid(curve, 0.30, z)
-        except Exception:
+        except Exception as ex:
+            qa.append('PREVIEW: could not band a wall (%s)' % ex)
             continue
         by_colour.setdefault(rgb, []).append(solid)
     for rgb, solids in by_colour.items():
@@ -682,20 +731,23 @@ def draw_preview(host, view, bands, recolour, z, qa):
             shape.SetShape(solids)
             view.SetElementOverrides(shape.Id, make_override(view, category, rgb))
             shapes.append((shape, rgb))
-            drawn += 1
-        except Exception:
-            pass
+            drawn += len(solids)
+        except Exception as ex:
+            qa.append('PREVIEW: could not draw the %s band(s) (%s)'
+                      % ('blue' if rgb == PREVIEW_BLUE else
+                         ('amber' if rgb == PREVIEW_AMBER else 'red'), ex))
     coloured = {}
     for element_id, rgb in recolour:
         try:
             element = host.GetElement(ElementId(element_id))
             if element is None:
+                qa.append('PREVIEW: wall %s is no longer in the model' % element_id)
                 continue
             view.SetElementOverrides(element.Id, make_override(view, element.Category.Id, rgb))
             coloured.setdefault(rgb, []).append(str(element_id))
-            drawn += 1
-        except Exception:
-            pass
+            recoloured += 1
+        except Exception as ex:
+            qa.append('PREVIEW: could not recolour wall %s (%s)' % (element_id, ex))
     for shape, rgb in shapes:
         try:
             comment = shape.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
@@ -703,7 +755,7 @@ def draw_preview(host, view, bands, recolour, z, qa):
                 comment.Set(PREVIEW_MARK + ' walls=' + ','.join(coloured.get(rgb, [])))
         except Exception:
             qa.append('PREVIEW: could not mark a preview element; it may need deleting by hand')
-    return drawn
+    return drawn, recoloured
 
 
 def write_audit(folder, base_name, rows, totals, mode, run_id):
@@ -735,7 +787,7 @@ def write_audit(folder, base_name, rows, totals, mode, run_id):
     except Exception:
         return False
 
-def plan_clusters(b, m, r, tol, sp, redraw_wins, qa, issues):
+def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
     """Plan the merge, one cluster at a time.
 
     Returns (geometry plan, parameter plan). The geometry plan has one entry
@@ -786,7 +838,24 @@ def plan_clusters(b, m, r, tol, sp, redraw_wins, qa, issues):
             if n in r:
                 for wd in state_walls(r[n]).values():rw.setdefault(wd['element_id'],wd)
             if n in b:bw.extend(baseline_walls(b[n]))
-        plan=plan_component(wall_records(list(mw.values())),wall_records(list(rw.values())),bw,tol,sp)
+        base_records=wall_records(list(mw.values()))
+        redraw_records=wall_records(list(rw.values()))
+        if r_walls:
+            # Walls of the Redraw that no longer bound a room - the designer
+            # deleted the stand but kept its walls - are still walls, so they
+            # belong to the cluster and must not be taken out of Main.
+            cell=cell_size(tol)
+            buckets=build_buckets(r_walls,cell)
+            for record in bw:
+                for index in find_matches(record,r_walls,buckets,tol,sp,cell):
+                    orphan=r_walls[index]
+                    key=orphan['ref']['element_id']
+                    if key in rw:
+                        # already known from a room boundary
+                        continue
+                    rw[key]=orphan['ref']
+                    redraw_records.append(orphan)
+        plan=plan_component(base_records,redraw_records,bw,tol,sp)
         if plan['conflicts']:
             for wall,reason in plan['conflicts']:
                 issues.append({'stand':None,'cluster':cid,'type':'GEOMETRY CONFLICT','reason':reason})
@@ -874,7 +943,8 @@ try:
     adjacency=adjacency_from_wall_usage(usage)
     components=find_components(sorted(set(b)|set(m)|set(r)),adjacency)
 
-    gplan,pplan=plan_clusters(b,m,r,tol,sp,redraw_wins,qa,issues)
+    redraw_all=wall_records(list(collect_walls(ldoc,lnk.GetTotalTransform()).values()))
+    gplan,pplan=plan_clusters(b,m,r,redraw_all,tol,sp,redraw_wins,qa,issues)
 
     # ---- parameters, as before ----
     for n in sorted(set(b)|set(m)|set(r)):
@@ -896,9 +966,14 @@ try:
         for wall in plan['create']:bands.append((wall['ref']['curve'],PREVIEW_BLUE))
         for wall,redraw_wall in plan['replace']:
             bands.append((redraw_wall['ref']['curve'],PREVIEW_BLUE))
+            bands.append((wall['ref']['curve'],PREVIEW_AMBER))
             recolour.append((wall['ref']['element_id'],PREVIEW_AMBER))
-        for wall in plan['delete']:recolour.append((wall['ref']['element_id'],PREVIEW_AMBER))
-        for wall,reason in plan['retained']:recolour.append((wall['ref']['element_id'],PREVIEW_RED))
+        for wall in plan['delete']:
+            bands.append((wall['ref']['curve'],PREVIEW_AMBER))
+            recolour.append((wall['ref']['element_id'],PREVIEW_AMBER))
+        for wall,reason in plan['retained']:
+            bands.append((wall['ref']['curve'],PREVIEW_RED))
+            recolour.append((wall['ref']['element_id'],PREVIEW_RED))
 
     summary_link_removed='PENDING' if cleanup else 'NOT REQUIRED'
     preview_note=None
@@ -913,9 +988,13 @@ try:
             view=doc.ActiveView
             cleared=clear_preview(doc,view)
             z=preview_height(m,gplan)
-            drawn=draw_preview(doc,view,bands,recolour,z,qa)
-            preview_note='Preview drawn: %d blue band(s), %d recoloured wall(s).'%(
-                sum(1 for b2 in bands if b2[1]==PREVIEW_BLUE),len(recolour))
+            drawn,recoloured=draw_preview(doc,view,bands,recolour,z,qa)
+            preview_note=('Preview drawn: %d band(s) (%d blue, %d amber, %d red), %d wall(s) recoloured.'%(
+                drawn,
+                sum(1 for b2 in bands if b2[1]==PREVIEW_BLUE),
+                sum(1 for b2 in bands if b2[1]==PREVIEW_AMBER),
+                sum(1 for b2 in bands if b2[1]==PREVIEW_RED),
+                recoloured))
             if cleared:preview_note+=' Removed %d element(s) from an earlier preview.'%cleared
             qa.append(preview_note)
         except Exception as ex:
@@ -932,6 +1011,15 @@ try:
                 if op['status']!='PLANNED':continue
                 plan=op['_plan']
                 try:
+                    written=0;moved=0;tags=0
+                    # Rooms the Redraw deleted go first. Removing a shared wall
+                    # while both rooms still exist puts two rooms in one region,
+                    # and Revit's answer to that is a modal warning that edits
+                    # the document outside this transaction.
+                    for action,number in op['_rooms']:
+                        if action=='DELETE':
+                            doc.Delete(ElementId(m[number]['element_id']))
+                    doc.Regenerate()
                     for wall in plan['delete']:doc.Delete(ElementId(wall['ref']['element_id']))
                     for wall,redraw_wall in plan['replace']:doc.Delete(ElementId(wall['ref']['element_id']))
                     doc.Regenerate()
@@ -939,7 +1027,6 @@ try:
                     for wall in plan['create']:create_wall(doc,level_id,wall['ref'])
                     for wall,redraw_wall in plan['replace']:create_wall(doc,level_id,redraw_wall['ref'])
                     doc.Regenerate()
-                    written=0;moved=0;tags=0
                     for action,number in op['_rooms']:
                         if action=='ADD':
                             redraw_state=r.get(number)
@@ -951,8 +1038,6 @@ try:
                             if level is None:raise Exception('Level not found in Main: '+str(redraw_state.get('level_name')))
                             room,params=create_room(doc,level,redraw_state,number,values)
                             written+=len(params)
-                        elif action=='DELETE':
-                            doc.Delete(ElementId(m[number]['element_id']))
                         else:
                             room=m[number]['room']
                             tag_ids=room_tag_ids_in_active_view(doc,room)
@@ -977,7 +1062,8 @@ try:
             try:tx.RollBack()
             except:pass
             raise
-        doc.Regenerate()
+        # Committing regenerates the document by itself, so there is no need
+        # to regenerate here - and doing so outside a transaction is refused.
         fresh=collect(doc,None,qa,'Verify',loc)
         for op in gplan:
             if op['status']=='APPLIED':
