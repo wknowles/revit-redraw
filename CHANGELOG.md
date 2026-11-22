@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-11-22 — Phase 0 probe for the Redraw merge rebuild
+
+- Added `phase0/`, a diagnostic tool that is **not** part of the 1 → 2 workflow.
+  It answers the runtime questions the Revit API documentation cannot answer
+  before graph 2 is rebuilt around wall-level matching and a visual preview:
+  - **A** does a per-element view override (`View.SetElementOverrides`)
+    recolour an existing wall in a floor plan?
+  - **B** do DirectShape surfaces render in a floor plan, and does
+    `SetElementOverrides` accept a DirectShape?
+  - **C** is a Room's `Number` writable (needed to create an added stand)?
+  - **D** are room boundary curves trimmed to the room, or the full wall curve?
+- `phase0/phase0_probe.py` is the source of truth; `phase0/Phase 0 Prototype.dyn`
+  is generated from it by `python3 phase0/build_dyn.py` and verified with
+  `python3 phase0/build_dyn.py --check`. The generated graph is CRLF JSON with
+  the Python stored as escaped `\r\n`, like the two workflow graphs.
+- The probe is safe by default: all diagnostics run inside a transaction that is
+  rolled back. The optional visible test commits one transaction and is undone
+  with a single Ctrl+Z; a later run also clears the previous probe elements.
+- Docs updated (`AGENTS.md`, `phase0/README.md`). No Revit runtime was
+  available, so the four questions above are still open.
+
 ## 2026-11-21 — Centerline boundaries, clean names, Main-active workflow
 
 - **Graph 1 boundary extraction** now uses `SpatialElementBoundaryLocation.Center`

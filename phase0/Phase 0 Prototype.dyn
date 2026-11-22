@@ -1,0 +1,213 @@
+{
+  "Uuid": "b7d4e2a1-5c38-4f6b-9e07-2ad3c1f8b640",
+  "IsCustomNode": false,
+  "Description": "Phase 0 probe: answers the runtime questions the Revit API documentation cannot answer before the Redraw merge is rebuilt.",
+  "Name": "Phase 0 Prototype",
+  "ElementResolver": {
+    "ResolutionMap": {}
+  },
+  "Inputs": [
+    {
+      "Id": "4c9f1e5b8d36a2705e4b9c1f3d86a479",
+      "Name": "Run Visual Test",
+      "Type": "boolean",
+      "Type2": "boolean",
+      "Value": "false",
+      "Description": "False runs diagnostics only and changes nothing. True commits one transaction that draws a blue band and a green wall so the result can be looked at. Press Ctrl+Z once afterwards."
+    }
+  ],
+  "Outputs": [
+    {
+      "Id": "7ea2d5c9e4b13f60a8d3c7b1e5f20486",
+      "Name": "Probe Log",
+      "Type": "unknown",
+      "InitialValue": "",
+      "Description": "Visualizes a node's output"
+    }
+  ],
+  "Nodes": [
+    {
+      "ConcreteType": "PythonNodeModels.PythonNode, PythonNodeModels",
+      "Engine": "PythonNet3",
+      "VariableInputPorts": true,
+      "Id": "3e8b1c47a5d24f0e9b6c7d18a2f4e5309",
+      "NodeType": "PythonScriptNode",
+      "Inputs": [
+        {
+          "Id": "6b2e4d8a1c7f4390b5e2d6a8f1c37045",
+          "Name": "IN[0]",
+          "Description": "Input #0",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "5a1f9c3d7e2b48d0b6f1a4c8e3d50792",
+          "Name": "OUT",
+          "Description": "Result of the python script",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Runs an embedded Python script.",
+      "Code": "# -*- coding: utf-8 -*-\r\n\"\"\"Phase 0 probe for the Redraw merge work.\r\n\r\nRevit 2027 | Dynamo 4.0.2 | CPython3/PythonNet3\r\n\r\nAnswers the runtime questions that the Revit API documentation cannot answer:\r\n\r\nA  Can a per-element view override recolour an existing wall in a floor plan?\r\nB  Do DirectShape surfaces render in a floor plan, and does SetElementOverrides\r\n   accept a DirectShape?\r\nC  Is a Room's Number writable (LookupParameter('Number') or the built-in\r\n   BuiltInParameter.ROOM_NUMBER)?\r\nD  Are room boundary curves trimmed to the room, or are they the full wall\r\n   curve?  This decides how baseline curves are matched against Main walls.\r\nE  What does Document.Create.NewRoom do inside an existing room?\r\n\r\nIN[0] Boolean  run the visible test.  False (default) runs diagnostics only and\r\n               changes nothing.  True commits one transaction that draws a blue\r\n               band and a green wall so the result can be looked at; press\r\n               Ctrl+Z once afterwards to remove it.\r\n\r\nOUT   List of log lines.\r\n\r\nThe probe picks a shared wall (one that bounds two or more rooms) so that\r\nquestion D is answered on the case that actually matters.  Nothing is written\r\nto the model unless IN[0] is True.\r\n\"\"\"\r\nimport clr, re\r\n\r\nclr.AddReference('RevitAPI')\r\nfrom Autodesk.Revit.DB import (\r\n    BuiltInCategory, BuiltInParameter, Color, CurveLoop, DirectShape, ElementId,\r\n    Extrusion, FilteredElementCollector, GeometryCreationUtilities, GeometryObject,\r\n    Line, OverrideGraphicSettings, SolidOptions, SpatialElementBoundaryOptions,\r\n    SpatialElementBoundaryLocation, StorageType, Transaction, UV, Wall, XYZ)\r\nfrom RevitServices.Persistence import DocumentManager\r\n\r\nPROBE_MARK = 'PHASE0 PROBE'\r\nBAND_WIDTH = 0.30          # internal feet\r\nBAND_LIFT = 0.05           # internal feet\r\n\r\n\r\ndef _in(index, default=None):\r\n    \"\"\"Read an optional Dynamo input without exploding when it is absent.\"\"\"\r\n    try:\r\n        value = IN[index]\r\n    except Exception:\r\n        return default\r\n    return default if value is None else value\r\n\r\n\r\ndef eidv(element_id):\r\n    try:\r\n        return int(element_id.Value)\r\n    except Exception:\r\n        return int(element_id.IntegerValue)\r\n\r\n\r\ndef band_solid(curve, width, z, samples=12):\r\n    \"\"\"A closed rectangle around a curve, extruded slightly upward.\"\"\"\r\n    points = [curve.Evaluate(float(i) / samples, True) for i in range(samples + 1)]\r\n    left = []\r\n    right = []\r\n    for i, p in enumerate(points):\r\n        if i == 0:\r\n            d = points[1] - points[0]\r\n        elif i == len(points) - 1:\r\n            d = points[-1] - points[-2]\r\n        else:\r\n            d = points[i + 1] - points[i - 1]\r\n        d = XYZ(d.X, d.Y, 0.0)\r\n        if d.Length < 1e-9:\r\n            d = XYZ(1.0, 0.0, 0.0)\r\n        d = d.Normalize()\r\n        offset = XYZ(-d.Y, d.X, 0.0) * (width / 2.0)\r\n        left.append(XYZ(p.X + offset.X, p.Y + offset.Y, z))\r\n        right.append(XYZ(p.X - offset.X, p.Y - offset.Y, z))\r\n    ring = left + right[::-1]\r\n    loop = CurveLoop()\r\n    for i in range(len(ring)):\r\n        loop.Append(Line.CreateBound(ring[i], ring[(i + 1) % len(ring)]))\r\n    path = Line.CreateBound(XYZ(0.0, 0.0, z), XYZ(0.0, 0.0, z + BAND_LIFT))\r\n    try:\r\n        return GeometryCreationUtilities.CreateExtrusionSolid(loop, path, BAND_LIFT)\r\n    except Exception:\r\n        return Extrusion.Create(loop, path, BAND_LIFT)\r\n\r\n\r\ndef make_direct_shape(doc, solid):\r\n    \"\"\"Create a DirectShape in Generic Annotations, whichever API is available.\"\"\"\r\n    category = ElementId(BuiltInCategory.OST_GenericAnnotations)\r\n    shape = None\r\n    try:\r\n        shape = DirectShape.CreateElement(doc, category)\r\n    except Exception:\r\n        shape = None\r\n    if shape is None:\r\n        try:\r\n            shape = doc.Create.NewDirectShape(category, [solid])\r\n        except Exception:\r\n            shape = None\r\n    if shape is None:\r\n        raise Exception('Could not create a DirectShape in Generic Annotations')\r\n    try:\r\n        shape.SetShape([solid])\r\n    except Exception:\r\n        from System import Array\r\n        shape.SetShape(Array[GeometryObject]([solid]))\r\n    return shape\r\n\r\n\r\ndef blue_style():\r\n    style = OverrideGraphicSettings()\r\n    style.SetSurfaceForegroundPatternColor(Color(0, 120, 255))\r\n    style.SetSurfaceForegroundPatternVisible(True)\r\n    style.SetCutForegroundPatternColor(Color(0, 120, 255))\r\n    style.SetCutForegroundPatternVisible(True)\r\n    style.SetProjectionLineColor(Color(0, 120, 255))\r\n    return style\r\n\r\n\r\ndef green_style(view, wall):\r\n    style = OverrideGraphicSettings(view.GetCategoryOverrides(wall.Category.Id))\r\n    style.SetCutForegroundPatternColor(Color(0, 190, 0))\r\n    style.SetCutLineColor(Color(0, 190, 0))\r\n    style.SetProjectionLineColor(Color(0, 190, 0))\r\n    return style\r\n\r\n\r\ndef clear_previous_probe(doc, view):\r\n    \"\"\"Remove DirectShapes left by an earlier visible test and reset their wall override.\"\"\"\r\n    removed = 0\r\n    try:\r\n        notes = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_GenericAnnotations) \\\r\n            .WhereElementIsNotElementType().ToElements()\r\n    except Exception:\r\n        return 0\r\n    for element in notes:\r\n        try:\r\n            parameter = element.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)\r\n            if parameter is None or parameter.StorageType != StorageType.String:\r\n                continue\r\n            text = parameter.AsString() or ''\r\n            if not text.startswith(PROBE_MARK):\r\n                continue\r\n            match = re.search(r'wall=(-?\\d+)', text)\r\n            if match:\r\n                try:\r\n                    previous = doc.GetElement(ElementId(int(match.group(1))))\r\n                    if previous is not None:\r\n                        view.SetElementOverrides(previous.Id,\r\n                                                 view.GetCategoryOverrides(previous.Category.Id))\r\n                except Exception:\r\n                    pass\r\n            doc.Delete(element.Id)\r\n            removed += 1\r\n        except Exception:\r\n            pass\r\n    return removed\r\n\r\n\r\ndef run():\r\n    doc = DocumentManager.Instance.CurrentDBDocument\r\n    if doc is None:\r\n        log('FATAL: no active Revit document. Open a project model first.')\r\n        return\r\n    view = doc.ActiveView\r\n    log('Revit %s | active view \"%s\" type=%s' % (doc.Application.VersionNumber, view.Name, view.ViewType))\r\n    try:\r\n        log('A1 AreGraphicsOverridesAllowed: %s' % view.AreGraphicsOverridesAllowed())\r\n    except Exception as ex:\r\n        log('A1 AreGraphicsOverridesAllowed FAILED: %s' % ex)\r\n\r\n    options = SpatialElementBoundaryOptions()\r\n    options.SpatialElementBoundaryLocation = SpatialElementBoundaryLocation.Center\r\n\r\n    rooms = list(FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Rooms)\r\n                 .WhereElementIsNotElementType().ToElements())\r\n    triples = []\r\n    for room in rooms:\r\n        try:\r\n            if not room.IsPlaced:\r\n                continue\r\n            segments = room.GetBoundarySegments(options)\r\n        except Exception:\r\n            continue\r\n        if not segments:\r\n            continue\r\n        for loop in segments:\r\n            for segment in loop:\r\n                try:\r\n                    element = doc.GetElement(segment.ElementId)\r\n                except Exception:\r\n                    continue\r\n                if isinstance(element, Wall):\r\n                    triples.append((room, segment, element))\r\n    log('E0 rooms=%d  wall boundary segments=%d' % (len(rooms), len(triples)))\r\n    if not triples:\r\n        log('FATAL: no placed room with a wall boundary was found.')\r\n        return\r\n\r\n    usage = {}\r\n    for room, segment, wall in triples:\r\n        key = eidv(wall.Id)\r\n        usage[key] = usage.get(key, 0) + 1\r\n    shared = set([key for key, count in usage.items() if count > 1])\r\n    log('E1 walls bounding more than one room: %d of %d' % (len(shared), len(usage)))\r\n\r\n    # D: full wall curve or trimmed to the room?\r\n    candidates = [t for t in triples if eidv(t[2].Id) in shared]\r\n    if not candidates:\r\n        log('D  (no shared wall in this model - results below are not conclusive)')\r\n        candidates = triples\r\n    trimmed = False\r\n    for room, segment, wall in candidates[:4]:\r\n        try:\r\n            segment_length = segment.GetCurve().Length\r\n            wall_length = wall.Location.Curve.Length\r\n            shorter = segment_length < wall_length - 1e-6\r\n            trimmed = trimmed or shorter\r\n            log('D  room %-8s segment len=%9.4f  wall len=%9.4f  %s'\r\n                % (room.Number or '?', segment_length, wall_length,\r\n                   'TRIMMED' if shorter else 'FULL WALL'))\r\n        except Exception as ex:\r\n            log('D  curve comparison failed: %s' % ex)\r\n    log('D  => boundary curves are %s' % ('TRIMMED per room' if trimmed else 'FULL WALL curves'))\r\n\r\n    focus = candidates[0]\r\n    room = focus[0]\r\n    wall = focus[2]\r\n    try:\r\n        wall_type = doc.GetElement(wall.GetTypeId())\r\n        wall_type_name = wall_type.Name if wall_type else '?'\r\n    except Exception:\r\n        wall_type_name = '?'\r\n    log('E2 focus: room %r (%s), wall %s, wall type %s'\r\n        % (room.Number, room.Name, wall.Id, wall_type_name))\r\n\r\n    z = 0.0\r\n    try:\r\n        z = room.Level.Elevation + 0.02\r\n    except Exception:\r\n        pass\r\n\r\n    # ---- diagnostics, all rolled back -------------------------------------\r\n    transaction = Transaction(doc, 'Phase 0 probe - diagnostics')\r\n    transaction.Start()\r\n    try:\r\n        level = doc.GetElement(room.LevelId)\r\n        try:\r\n            anchor = room.Location.Point\r\n        except Exception:\r\n            anchor = None\r\n        attempts = []\r\n        if anchor is not None:\r\n            attempts.append(('inside an existing room', anchor))\r\n            attempts.append(('offset by +1000 ft', XYZ(anchor.X + 1000.0, anchor.Y + 1000.0, 0.0)))\r\n        for label, point in attempts:\r\n            try:\r\n                # NewRoom takes a UV position on the level, not an XYZ.\r\n                probe_room = doc.Create.NewRoom(level, UV(point.X, point.Y))\r\n            except Exception as ex:\r\n                log('E  NewRoom (%s) FAILED: %s' % (label, ex))\r\n                continue\r\n            try:\r\n                has_boundary = probe_room.GetBoundarySegments(options) is not None\r\n            except Exception:\r\n                has_boundary = None\r\n            try:\r\n                is_placed = probe_room.IsPlaced\r\n            except Exception:\r\n                is_placed = None\r\n            log('E  NewRoom (%s): placed=%s hasBoundary=%s number=%r'\r\n                % (label, is_placed, has_boundary, probe_room.Number))\r\n            parameter = None\r\n            try:\r\n                parameter = probe_room.LookupParameter('Number')\r\n            except Exception:\r\n                pass\r\n            log('C  LookupParameter(\"Number\"): found=%s readonly=%s'\r\n                % (parameter is not None, parameter.IsReadOnly if parameter is not None else None))\r\n            if parameter is not None:\r\n                try:\r\n                    parameter.Set('PHASE0-999')\r\n                    log('C  Set(\"PHASE0-999\") -> Number=%r  => WRITABLE' % probe_room.Number)\r\n                except Exception as ex:\r\n                    log('C  Set failed: %s' % ex)\r\n            try:\r\n                builtin = probe_room.get_Parameter(BuiltInParameter.ROOM_NUMBER)\r\n                log('C  built-in ROOM_NUMBER: found=%s readonly=%s'\r\n                    % (builtin is not None, builtin.IsReadOnly if builtin is not None else None))\r\n                if builtin is not None and not builtin.IsReadOnly:\r\n                    try:\r\n                        builtin.Set('PHASE0-998')\r\n                        log('C  built-in Set -> Number=%r  => WRITABLE' % probe_room.Number)\r\n                    except Exception as ex:\r\n                        log('C  built-in Set failed: %s' % ex)\r\n            except Exception as ex:\r\n                log('C  built-in ROOM_NUMBER lookup failed: %s' % ex)\r\n            try:\r\n                doc.Delete(probe_room.Id)\r\n            except Exception:\r\n                pass\r\n    except Exception as ex:\r\n        log('C/E diagnostics failed: %s' % ex)\r\n\r\n    try:\r\n        solid = band_solid(wall.Location.Curve, BAND_WIDTH, z)\r\n        log('B1 band solid built ok')\r\n    except Exception as ex:\r\n        solid = None\r\n        log('B1 band solid FAILED: %s' % ex)\r\n    if solid is not None:\r\n        try:\r\n            shape = make_direct_shape(doc, solid)\r\n            log('B1 DirectShape created ok -> %s' % shape.Id)\r\n        except Exception as ex:\r\n            log('B1 DirectShape creation FAILED: %s' % ex)\r\n        try:\r\n            view.SetElementOverrides(shape.Id, blue_style())\r\n            log('B1 SetElementOverrides(DirectShape) ok')\r\n        except Exception as ex:\r\n            log('B1 SetElementOverrides on DirectShape FAILED: %s' % ex)\r\n        try:\r\n            log('A2 GetCategoryOverrides ok -> %s'\r\n                % (view.GetCategoryOverrides(wall.Category.Id) is not None))\r\n        except Exception as ex:\r\n            log('A2 GetCategoryOverrides FAILED: %s' % ex)\r\n    try:\r\n        transaction.RollBack()\r\n    except Exception:\r\n        pass\r\n    log('C/E/A2/B1 diagnostics ROLLED BACK - the model is unchanged')\r\n\r\n    # ---- optional visible test, committed ---------------------------------\r\n    if not bool(_in(0, False)):\r\n        log('A2/B2 visible test skipped. Set \"Run Visual Test\" to true to see it.')\r\n        return\r\n    removed = clear_previous_probe(doc, view)\r\n    if removed:\r\n        log('VISUAL cleanup: removed %d probe element(s) from an earlier run' % removed)\r\n    transaction = Transaction(doc, 'Phase 0 probe - visual test')\r\n    transaction.Start()\r\n    try:\r\n        solid = band_solid(wall.Location.Curve, BAND_WIDTH, z)\r\n        shape = make_direct_shape(doc, solid)\r\n        view.SetElementOverrides(shape.Id, blue_style())\r\n        view.SetElementOverrides(wall.Id, green_style(view, wall))\r\n        try:\r\n            comment = shape.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)\r\n            if comment is not None and comment.StorageType == StorageType.String:\r\n                comment.Set('%s wall=%d' % (PROBE_MARK, eidv(wall.Id)))\r\n        except Exception:\r\n            pass\r\n        transaction.Commit()\r\n        log('VISUAL committed: blue band on wall %s, wall coloured green.' % wall.Id)\r\n        log('>>> Look at the plan, then press Ctrl+Z once to remove the probe.')\r\n    except Exception as ex:\r\n        try:\r\n            transaction.RollBack()\r\n        except Exception:\r\n            pass\r\n        log('VISUAL FAILED: %s' % ex)\r\n\r\n\r\nLOG = []\r\n\r\n\r\ndef log(message):\r\n    try:\r\n        LOG.append(str(message))\r\n    except Exception:\r\n        pass\r\n\r\n\r\ntry:\r\n    run()\r\nexcept Exception as ex:\r\n    LOG.append('PROBE CRASHED: %s' % ex)\r\n\r\nOUT = LOG\r\n"
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.BoolSelector, CoreNodeModels",
+      "Id": "4c9f1e5b8d36a2705e4b9c1f3d86a479",
+      "NodeType": "BooleanInputNode",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "5d0a2f6c9e47b3816f5c0d2a4e97b58a",
+          "Name": "",
+          "Description": "Boolean",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Enables selection between True and False",
+      "InputValue": false
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Watch, CoreNodeModels",
+      "WatchWidth": 500.0,
+      "WatchHeight": 420.0,
+      "Id": "7ea2d5c9e4b13f60a8d3c7b1e5f20486",
+      "NodeType": "ExtensionNode",
+      "Inputs": [
+        {
+          "Id": "8fb3e6d0a5c24071b9e4d8c2f6031597",
+          "Name": "",
+          "Description": "Node to show output from",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "90c4f7e1b6d35182c0f5e9d3a71426a8",
+          "Name": "",
+          "Description": "Node output",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Visualizes a node's output"
+    }
+  ],
+  "Connectors": [
+    {
+      "Start": "5d0a2f6c9e47b3816f5c0d2a4e97b58a",
+      "End": "6b2e4d8a1c7f4390b5e2d6a8f1c37045",
+      "Id": "a1d5c8f2b6e94a730c8d1f5b9e3a70426",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "5a1f9c3d7e2b48d0b6f1a4c8e3d50792",
+      "End": "8fb3e6d0a5c24071b9e4d8c2f6031597",
+      "Id": "b2e6d9a3c7f04b81d9e2a6c0f4b81537",
+      "IsHidden": "False"
+    }
+  ],
+  "Dependencies": [],
+  "NodeLibraryDependencies": [],
+  "EnableLegacyPolyCurveBehavior": true,
+  "Thumbnail": "",
+  "GraphDocumentationURL": null,
+  "ExtensionWorkspaceData": [
+    {
+      "ExtensionGuid": "28992e1d-abb9-417f-8b1b-05e053bee670",
+      "Name": "Properties",
+      "Version": "4.0",
+      "Data": {}
+    },
+    {
+      "ExtensionGuid": "DFBD9CC0-DB40-457A-939E-8C8555555A9D",
+      "Name": "Generative Design",
+      "Version": "10.3",
+      "Data": {}
+    }
+  ],
+  "Author": "",
+  "Linting": {
+    "activeLinter": "None",
+    "activeLinterId": "7b75fb44-43fd-4631-a878-29f4d5d8399a",
+    "warningCount": 0,
+    "errorCount": 0
+  },
+  "Bindings": [],
+  "View": {
+    "Dynamo": {
+      "ScaleFactor": 1.0,
+      "HasRunWithoutCrash": true,
+      "IsVisibleInDynamoLibrary": true,
+      "Version": "4.0.2.3852",
+      "RunType": "Manual",
+      "RunPeriod": "1000"
+    },
+    "Camera": {
+      "Name": "_Background Preview",
+      "EyeX": -17.0,
+      "EyeY": 24.0,
+      "EyeZ": 50.0,
+      "LookX": 12.0,
+      "LookY": -13.0,
+      "LookZ": -58.0,
+      "UpX": 0.0,
+      "UpY": 1.0,
+      "UpZ": 0.0
+    },
+    "ConnectorPins": [],
+    "NodeViews": [
+      {
+        "Id": "4c9f1e5b8d36a2705e4b9c1f3d86a479",
+        "Name": "Run Visual Test",
+        "IsSetAsInput": true,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 120.0,
+        "Y": 120.0
+      },
+      {
+        "Id": "3e8b1c47a5d24f0e9b6c7d18a2f4e5309",
+        "Name": "Phase 0 Probe",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 430.0,
+        "Y": 190.0
+      },
+      {
+        "Id": "7ea2d5c9e4b13f60a8d3c7b1e5f20486",
+        "Name": "Probe Log",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": true,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 900.0,
+        "Y": 190.0
+      }
+    ],
+    "Annotations": [],
+    "X": -523.4938468005303,
+    "Y": -8.356583784257623,
+    "Zoom": 0.879394765673039
+  }
+}
