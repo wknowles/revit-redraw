@@ -92,6 +92,10 @@ def main():
                         [PYTHON, os.path.join(ROOT, 'phase0', 'test_probe.py')]))
     failures.extend(run('merge core unit tests',
                         [PYTHON, os.path.join(ROOT, 'src', 'test_merge_core.py')]))
+    failures.extend(run('graph 2 planning tests',
+                        [PYTHON, os.path.join(ROOT, 'src', 'test_graph2_plan.py')]))
+    failures.extend(run('every call passes the right arguments',
+                        [PYTHON, os.path.join(HERE, 'check_calls.py')]))
     failures.extend(run('Revit API usage matches the 2027 documentation',
                         [PYTHON, os.path.join(HERE, 'check_api.py')]))
 

@@ -735,6 +735,112 @@ def write_audit(folder, base_name, rows, totals, mode, run_id):
     except Exception:
         return False
 
+def plan_clusters(b, m, r, tol, sp, redraw_wins, qa, issues):
+    """Plan the merge, one cluster at a time.
+
+    Returns (geometry plan, parameter plan). The geometry plan has one entry
+    per affected cluster; each entry carries the walls to keep, replace, delete
+    and create, and the room work to do.
+    """
+    # how every stand compares across baseline, Main and Redraw
+    statuses={}
+    for n in sorted(set(b)|set(m)|set(r)):
+        statuses[n]=stand_status(b.get(n),m.get(n),r.get(n),tol,sp)
+
+    # cluster the stands: neighbours share a wall
+    usage={}
+    usage.update(state_wall_usage(m,'m'));usage.update(state_wall_usage(r,'r'))
+    adjacency=adjacency_from_wall_usage(usage)
+    components=find_components(sorted(set(b)|set(m)|set(r)),adjacency)
+
+    gplan=[];pplan=[];comp_no=0
+    for comp in components:
+        affected=[n for n in comp if statuses.get(n) in ('AFFECTED','ADDED','REMOVED')]
+        conflicted=[n for n in comp if statuses.get(n)=='CONFLICT']
+        if not affected and not conflicted:continue
+        comp_no+=1;cid='C%d'%comp_no
+        op={'cluster':cid,'stands':comp,'affected':affected,'status':'PLANNED','change':'MOVED'}
+        blocked=None
+        for n in affected:
+            reason=level_mismatch(b.get(n),m.get(n),r.get(n))
+            if reason:blocked=reason;break
+        if blocked is None and conflicted and not redraw_wins:
+            blocked='Main and the Redraw changed this cluster differently'
+        if blocked is not None:
+            op['status']='SKIPPED';op['reason']=blocked
+            for n in conflicted:
+                issues.append({'stand':n,'cluster':cid,'type':'GEOMETRY CONFLICT','reason':blocked})
+            gplan.append(op);continue
+        if conflicted and redraw_wins:
+            # The Redraw's version wins, so the conflicted stands are planned
+            # like any other changed stand.
+            for n in conflicted:
+                issues.append({'stand':n,'cluster':cid,'type':'GEOMETRY CONFLICT',
+                               'reason':'Main and the Redraw changed this stand differently; the Redraw wins'})
+                if n not in affected:affected.append(n)
+            op['affected']=affected
+        mw={};rw={};bw=[]
+        for n in affected:
+            if n in m:
+                for wd in state_walls(m[n]).values():mw.setdefault(wd['element_id'],wd)
+            if n in r:
+                for wd in state_walls(r[n]).values():rw.setdefault(wd['element_id'],wd)
+            if n in b:bw.extend(baseline_walls(b[n]))
+        plan=plan_component(wall_records(list(mw.values())),wall_records(list(rw.values())),bw,tol,sp)
+        if plan['conflicts']:
+            for wall,reason in plan['conflicts']:
+                issues.append({'stand':None,'cluster':cid,'type':'GEOMETRY CONFLICT','reason':reason})
+            if redraw_wins:
+                for wall,reason in plan['conflicts']:plan['create'].append(wall)
+            else:
+                op['status']='SKIPPED'
+                op['reason']='Main and the Redraw disagree about a wall'
+                gplan.append(op);continue
+        if redraw_wins and plan['retained']:
+            # Main's own version of a wall the Redraw also changed is dropped:
+            # the Redraw wins.
+            for wall,reason in plan['retained']:plan['delete'].append(wall)
+            plan['retained']=[]
+        # Business rules: the boundary must be made of walls, and only the RX
+        # wall types may be rebuilt.
+        guard=None
+        for n in affected:
+            for source in (m,r):
+                st=source.get(n)
+                if st is None:continue
+                walls=sum(len(l) for l in st.get('wall_loops',[]))
+                curves=sum(len(l) for l in st.get('loops',[]))
+                if walls!=curves:
+                    guard='Stand %s has a boundary that is not made of walls'%n;break
+            if guard:break
+        if guard is None:
+            touched=[w for w in plan['delete']]+[w for w,_ in plan['replace']]
+            for wall in touched:
+                if wall['ref'].get('type') not in RX_TYPES:
+                    guard='Unsupported Main wall type: '+str(wall['ref'].get('type'));break
+        if guard is None:
+            for wall in plan['create']+[w for _,w in plan['replace']]:
+                if wall['ref'].get('type') not in RX_TYPES:
+                    guard='Unsupported Redraw wall type: '+str(wall['ref'].get('type'));break
+        if guard is not None:
+            op['status']='SKIPPED';op['reason']=guard;gplan.append(op);continue
+        op['_plan']=plan
+        op['_level']=component_level(affected,m)
+        rooms=[]
+        for n in affected:
+            kind=statuses.get(n)
+            if kind=='ADDED':rooms.append(('ADD',n))
+            elif kind=='REMOVED':rooms.append(('DELETE',n))
+            else:rooms.append(('MOVE',n))
+        op['_rooms']=rooms
+        op['change']='CLUSTER'
+        op['walls_kept']=len(plan['keep']);op['walls_replaced']=len(plan['replace'])
+        op['walls_created']=len(plan['create']);op['walls_deleted']=len(plan['delete'])
+        gplan.append(op)
+
+    return gplan,pplan
+
+
 qa=[];pout=[];gout=[];issues=[];summary={'Status':'FAILED'}
 lnk=None;link_type_id=None;cleanup=False
 try:
@@ -768,78 +874,7 @@ try:
     adjacency=adjacency_from_wall_usage(usage)
     components=find_components(sorted(set(b)|set(m)|set(r)),adjacency)
 
-    # ---- plan each cluster ----
-    gplan=[];pplan=[];comp_no=0
-    for comp in components:
-        affected=[n for n in comp if statuses.get(n) in ('AFFECTED','ADDED','REMOVED')]
-        conflicted=[n for n in comp if statuses.get(n)=='CONFLICT']
-        if not affected and not conflicted:continue
-        comp_no+=1;cid='C%d'%comp_no
-        op={'cluster':cid,'stands':comp,'affected':affected,'status':'PLANNED','change':'MOVED'}
-        blocked=None
-        for n in affected:
-            reason=level_mismatch(b.get(n),m.get(n),r.get(n))
-            if reason:blocked=reason;break
-        if blocked is None and conflicted:
-            blocked='Main and the Redraw changed this cluster differently'
-        if blocked is not None:
-            op['status']='SKIPPED';op['reason']=blocked
-            for n in conflicted:
-                issues.append({'stand':n,'cluster':cid,'type':'GEOMETRY CONFLICT','reason':blocked})
-            gplan.append(op);continue
-        mw={};rw={};bw=[]
-        for n in affected:
-            if n in m:
-                for wd in state_walls(m[n]).values():mw.setdefault(wd['element_id'],wd)
-            if n in r:
-                for wd in state_walls(r[n]).values():rw.setdefault(wd['element_id'],wd)
-            if n in b:bw.extend(baseline_walls(b[n]))
-        plan=plan_component(wall_records(list(mw.values())),wall_records(list(rw.values())),bw,tol,sp)
-        if plan['conflicts']:
-            for wall,reason in plan['conflicts']:
-                issues.append({'stand':None,'cluster':cid,'type':'GEOMETRY CONFLICT','reason':reason})
-            if redraw_wins:
-                for wall,reason in plan['conflicts']:plan['create'].append(wall)
-            else:
-                op['status']='SKIPPED'
-                op['reason']='Main and the Redraw disagree about a wall'
-                gplan.append(op);continue
-        # Business rules: the boundary must be made of walls, and only the RX
-        # wall types may be rebuilt.
-        guard=None
-        for n in affected:
-            for source in (m,r):
-                st=source.get(n)
-                if st is None:continue
-                walls=sum(len(l) for l in st.get('wall_loops',[]))
-                curves=sum(len(l) for l in st.get('loops',[]))
-                if walls!=curves:
-                    guard='Stand %s has a boundary that is not made of walls'%n;break
-            if guard:break
-        if guard is None:
-            touched=[w for w in plan['delete']]+[w for w,_ in plan['replace']]
-            for wall in touched:
-                if wall['ref'].get('type') not in RX_TYPES:
-                    guard='Unsupported Main wall type: '+str(wall['ref'].get('type'));break
-        if guard is None:
-            for wall in plan['create']+[w for _,w in plan['replace']]:
-                if wall['ref'].get('type') not in RX_TYPES:
-                    guard='Unsupported Redraw wall type: '+str(wall['ref'].get('type'));break
-        if guard is not None:
-            op['status']='SKIPPED';op['reason']=guard;gplan.append(op);continue
-        op['_plan']=plan
-        op['_level']=component_level(affected,m,r)
-        rooms=[]
-        for n in affected:
-            kind=statuses.get(n)
-            if kind=='ADDED':rooms.append(('ADD',n))
-            elif kind=='REMOVED':rooms.append(('DELETE',n))
-            else:rooms.append(('MOVE',n))
-        op['_rooms']=rooms
-        op['change']='CLUSTER'
-        op['walls_kept']=len(plan['keep']);op['walls_replaced']=len(plan['replace'])
-        op['walls_created']=len(plan['create']);op['walls_deleted']=len(plan['delete'])
-        gplan.append(op)
+    gplan,pplan=plan_clusters(b,m,r,tol,sp,redraw_wins,qa,issues)
 
     # ---- parameters, as before ----
     for n in sorted(set(b)|set(m)|set(r)):
@@ -877,8 +912,8 @@ try:
         try:
             view=doc.ActiveView
             cleared=clear_preview(doc,view)
-            z=preview_height(m,r,gplan)
-            drawn=draw_preview(doc,view,bands,recolour,z)
+            z=preview_height(m,gplan)
+            drawn=draw_preview(doc,view,bands,recolour,z,qa)
             preview_note='Preview drawn: %d blue band(s), %d recoloured wall(s).'%(
                 sum(1 for b2 in bands if b2[1]==PREVIEW_BLUE),len(recolour))
             if cleared:preview_note+=' Removed %d element(s) from an earlier preview.'%cleared
@@ -975,17 +1010,12 @@ try:
     try:
         rows=[];totals=[0,0,0,0,0,0,0,0,0,0,0,0]
         for op in gout:
-            if op['status'] in ('SKIPPED',):continue
-            rows.append([op.get('cluster',''),','.join(op.get('stands',[])),
+            rows.append([op.get('cluster',''),'',', '.join(op.get('stands',[])),
                          op.get('change',''),op.get('status',''),
                          op.get('walls_replaced',0),op.get('walls_created',0),
                          op.get('walls_deleted',0),op.get('params_written',0),
                          op.get('tags_moved',0),
-                         'walls kept %d'%op.get('walls_kept',0)])
-        for op in gout:
-            for n in op.get('stands',[]):
-                rows.append([op.get('cluster',''),n,op.get('change',''),op.get('status',''),
-                             0,0,0,0,0,'stand %s'%n])
+                         '%d wall(s) kept'%op.get('walls_kept',0)])
         merged=sum(1 for x in gout if x['status'] in ('PLANNED','VERIFIED'))
         skipped=sum(1 for x in gout if x['status']=='SKIPPED')
         totals=[merged,skipped,
@@ -1017,7 +1047,12 @@ try:
              'Preview':preview_note or 'NOT DRAWN',
              'Undo':'ONE STEP - MVP2.4B6 - Merge Redraw Updates' if apply else 'NOT REQUIRED'}
 except Exception as e:
-    qa.append('FATAL: '+str(e));summary['Status']='FAILED'
+    # Put the reason in the summary as well as the QA list: the summary is the
+    # watch that is always visible.
+    import traceback
+    detail=traceback.format_exc()
+    qa.append('FATAL: '+str(e));qa.append(detail)
+    summary['Status']='FAILED';summary['Error']=str(e);summary['Trace']=detail
 finally:
     # Emergency cleanup only. Normal cleanup happens before Main is edited.
     if cleanup and link_type_id is not None:

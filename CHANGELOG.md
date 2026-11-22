@@ -2,6 +2,27 @@
 
 ## 2026-11-22 — Wall level merge, visual preview and audit trail
 
+- Graph 2 failed on its first run after the rebuild, and the reason was
+  invisible: **the QA watch was never wired**. `OUT = (summary, pout, gout,
+  issues, qa)` only wired indices 0-3, so `qa` - which carries the fatal
+  message - went nowhere. The Summary only said `Status: Failed`.
+- Fixed, and the same class of problem cannot recur:
+  - **Graph 2's QA is now wired** to a watch (`OUT[4]`), and the watch labels
+    were corrected: `Parameter Conflicts` is really `Conflicts / Skips` and
+    `Errors` is really `Geometry Updates`.
+  - **The Summary now carries the error and the traceback**, so a failure is
+    diagnosable from the Summary watch alone.
+  - **`tools/check_calls.py`** compares every call against the signature of the
+    function it calls. It found three wrong argument counts in the new code -
+    `component_level`, `preview_height` and `draw_preview` - one of which was
+    the actual failure. The check is now part of `tools/check_repo.py`.
+  - **`src/test_graph2_plan.py`** drives the planning with stand, wall and curve
+    fakes, so the glue between the Revit data and the merge core is tested
+    offline. It found a real bug: `Redraw Wins On Conflicts` overrode a
+    *wall level* conflict but not a *stand level* one, so a stand where both
+    sides changed differently was still skipped.
+
+
 - Graph 2 is rebuilt around **wall level** comparison instead of room level, so
   a cluster of connected stands merges as one change:
   - a Main wall that already sits where a Redraw wall sits is **kept**;
