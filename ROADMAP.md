@@ -76,6 +76,9 @@ mocked pure-function tests passed. Run this checklist first:
 - [ ] Conflicts (both sides changed) → skipped/reported unless `Redraw Wins On
       Conflicts` is set; non-RX wall types and Room Separation Line boundaries →
       skipped/reported, never modified.
+- [ ] `Redraw Wins On Conflicts` with a stand re-created at a new location (same
+      Number in Main and the Redraw, no shared wall element ids): Main's old walls
+      are deleted, the Redraw's walls created, and the Room moved.
 
 ## 2. Known limitations (deliberate)
 

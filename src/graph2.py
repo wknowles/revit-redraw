@@ -1444,6 +1444,27 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
                 op['status']='SKIPPED'
                 op['reason']='Main and the Redraw disagree about a wall'
                 gplan.append(op);continue
+        if redraw_wins and conflicted and plan['retained']:
+            # A stand that exists in both documents but shares no wall element
+            # id with its Redraw copy was *re-created* there, not edited: the
+            # designer made a new stand with the same Number somewhere else.
+            # Main's version of that stand is the old one, so its walls go too.
+            # A shared id means the same wall lineage, and a wall Main added
+            # after the cut is still kept (P2).
+            recreated=set()
+            for n in conflicted:
+                if n in m and n in r:
+                    if not (set(state_walls(m[n])) & set(state_walls(r[n]))):
+                        recreated.add(n)
+            if recreated:
+                keep=[]
+                for wall,reason in plan['retained']:
+                    owners=wall_stands.get(wall['ref']['element_id'],set())
+                    if owners and owners<=recreated:
+                        plan['delete'].append(wall)
+                    else:
+                        keep.append((wall,reason))
+                plan['retained']=keep
         # Business rules: the boundary must be made of walls, and only the RX
         # wall types may be rebuilt.
         guard=None

@@ -63,6 +63,12 @@ Revit 2027 yet; `ROADMAP.md` section 1 is still the gate.
   Room location points: a cluster whose points moved is `MOVED`, and one whose
   boundary changed around a fixed point is `RESIZED`, so the summary column is no
   longer always 0.
+- **Follow-up — a stand re-created in the Redraw replaces Main's version.** A
+  stand that exists in Main and the Redraw but not the baseline at a new location
+  shares no wall element id with its Redraw copy. When `Redraw Wins On Conflicts`
+  resolves that conflict, Main's old walls are now deleted with the old geometry
+  instead of being retained as "later Main work". P2's fix had left them behind,
+  so only the Room moved.
 
 P8b's commit (`6146ac3`) is unsigned: 1Password signing was unavailable when it was
 made.

@@ -158,7 +158,11 @@ names the input. A coarse spacing only warns, and only when it exceeds both
    with an unchanged neighbour is matched instead of duplicated. Walls that Main
    added after the Redraw was cut are retained; walls Main removed are conflicts.
    A cluster with a conflict is skipped unless `Redraw Wins On Conflicts` is set.
-   The planner then applies the gates below before anything is touched.
+   When the Redraw wins and a conflicted stand shares no wall element id with its
+   Redraw copy, the stand was re-created there (same Number, new walls), so all
+   of its Main-only walls are deleted with the old geometry instead of being
+   retained as later Main work. The planner then applies the gates below before
+   anything is touched.
 8. **Preview** (dry run, one transaction `Redraw Merge Preview`, which also
    clears the previous preview) or **Apply** (two transactions: `Redraw Merge -
    Clear Preview`, then `MVP2.4B6 - Merge Redraw Updates`): delete the walls to

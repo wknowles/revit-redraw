@@ -442,6 +442,24 @@ def test_redraw_wins_overrides_a_conflict():
           'Main\'s own wall should stay retained, got %s' % gplan[0]['_plan']['retained'])
 
 
+def test_a_stand_recreated_in_the_redraw_replaces_main_walls():
+    """A stand that exists in Main and the Redraw but not the baseline, at a
+    different place with different walls, was re-created rather than edited.
+    When the Redraw wins, Main's old walls must go with the old Room."""
+    main = {'A05': stand('A05', [(21, Curve(0, 0, 10, 0))], 1)}
+    redraw = {'A05': stand('A05', [(31, Curve(50, 50, 60, 50))], 2)}
+    gplan, pplan, issues = plan({}, main, redraw, redraw_wins=True)
+    check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
+    check(gplan[0]['status'] == 'PLANNED', 'it should be planned, got %r'
+          % gplan[0].get('reason'))
+    deleted = [wall['ref']['element_id'] for wall in gplan[0]['_plan']['delete']]
+    created = [wall['ref']['element_id'] for wall in gplan[0]['_plan']['create']]
+    check(deleted == [21], "Main's old walls should be deleted, got %s" % deleted)
+    check(created == [31], "the Redraw's walls should be created, got %s" % created)
+    check(('MOVE', 'A05') in gplan[0]['_rooms'],
+          'the existing Room should be moved, got %s' % gplan[0]['_rooms'])
+
+
 def test_redraw_wins_still_blocks_an_unsupported_wall_type():
     base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
     main = {'A': stand('A', [(11, Curve(0, 5, 10, 5))], 1)}
