@@ -211,6 +211,43 @@ def collect(d,tr,qa,label,boundary_location='Finish',only=None):
         except Exception as e:qa.append(label+' '+n+': '+str(e))
     return out
 
+def collect_exclusions(d,qa,label,boundary_location='Finish'):
+    """The walls of the Rooms the merge cannot manage.
+
+    collect() skips a Room with a blank Number and quarantines a duplicate
+    Number, so those Rooms are in no state and their walls look unused. A wall
+    they share with a stand would then be deleted, which puts both Rooms in one
+    region - exactly what the shared-wall guard exists to prevent.
+    """
+    opt=SpatialElementBoundaryOptions()
+    opt.SpatialElementBoundaryLocation=SpatialElementBoundaryLocation.Center if boundary_location=='Center' else SpatialElementBoundaryLocation.Finish
+    rooms=FilteredElementCollector(d).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType().ToElements()
+    by_number={}
+    for room in rooms:
+        by_number.setdefault((room.Number or '').strip(),[]).append(room)
+    protected=set();duplicates=set()
+    for n,group in sorted(by_number.items()):
+        if n and len(group)==1:continue
+        if n:
+            duplicates.add(n)
+            qa.append(label+' '+n+': duplicate Room Number; the Room is not merged and '
+                      'its walls are protected.')
+        else:
+            for room in group:
+                qa.append(label+' Room element '+str(eidv(room.Id))+': blank Room Number; '
+                          'the Room is not merged and its walls are protected.')
+        # Only the unmanaged Rooms are read for boundaries: the managed ones
+        # were read by collect() already, and there can be thousands of them.
+        for room in group:
+            try:segloops=room.GetBoundarySegments(opt)
+            except:segloops=None
+            for sl in segloops or []:
+                for seg in sl:
+                    try:wid=eidv(seg.ElementId)
+                    except:continue
+                    if wid>0:protected.add(wid)
+    return protected,duplicates
+
 def jc(q):
     t=q.get('type')
     if t=='LINE':return [Line.CreateBound(X(q['start']),X(q['end']))]
@@ -1089,13 +1126,15 @@ def where(state):
         sum(len(loop) for loop in state.get('wall_loops', [])))
 
 
-def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
+def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=None, duplicates=None):
     """Plan the merge, one cluster at a time.
 
     Returns (geometry plan, parameter plan). The geometry plan has one entry
     per affected cluster; each entry carries the walls to keep, replace, delete
-    and create, and the room work to do.
+    and create, and the room work to do. `protected` holds the walls of Rooms
+    the merge does not manage and `duplicates` the duplicate Room Numbers.
     """
+    protected=protected or set();duplicates=duplicates or set()
     # how every stand compares across baseline, Main and Redraw
     statuses={}
     for n in sorted(set(b)|set(m)|set(r)):
@@ -1112,6 +1151,10 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
     for number,state in m.items():
         for wd in state_walls(state).values():
             wall_stands.setdefault(wd['element_id'],set()).add(number)
+    # A protected wall has a second, unmanaged owner, so the shared-wall guard
+    # below sees that deleting it would join it to that Room.
+    for wid in protected:
+        wall_stands.setdefault(wid,set()).add('#unmanaged')
 
     gplan=[];pplan=[];comp_no=0
     # The Redraw's whole wall inventory is bucketed once: the same buckets are
@@ -1128,6 +1171,14 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
         if not affected and not conflicted:continue
         comp_no+=1;cid='C%d'%comp_no
         op={'cluster':cid,'stands':comp,'affected':affected,'status':'PLANNED','change':'MOVED'}
+        dupes=sorted(set(comp)&duplicates)
+        if dupes:
+            reason=('Duplicate Room Number(s) in Main or the Redraw: %s. A Number must be '
+                    'unique before this cluster can be merged.'%(', '.join(dupes)))
+            issues.append({'stand':dupes[0],'cluster':cid,'type':'DUPLICATE ROOM NUMBER',
+                           'reason':reason})
+            op['status']='SKIPPED';op['reason']=reason
+            gplan.append(op);continue
         blocked=None
         for n in affected:
             reason=level_mismatch(b.get(n),m.get(n),r.get(n))
@@ -1192,12 +1243,25 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
         for wall in touched_main:
             owners=wall_stands.get(wall['ref']['element_id'],set())
             staying=sorted([n for n in owners if n not in removed_stands])
-            if len(staying)>1:
-                # The wall separates two stands that both keep a room, so
-                # removing it would put both rooms in one region.
-                guard=('The Redraw removes a wall that still separates %s, so they would '
-                       'end up in one region. Delete one of them in the Redraw, or leave '
-                       'the wall in the Redraw too.'%(', '.join(staying)))
+            if len(staying)>1 or '#unmanaged' in staying:
+                # The wall separates two stands that both keep a room, or a
+                # stand and a Room the merge does not manage, so removing it
+                # would put both rooms in one region.
+                names=[n for n in staying if n!='#unmanaged']
+                if '#unmanaged' in staying:
+                    if names:
+                        guard=('The Redraw removes a wall that still separates %s and a Room '
+                               'the merge does not manage, so they would end up in one region. '
+                               'Delete the stand in the Redraw, or leave the wall in the Redraw '
+                               'too.'%(', '.join(names)))
+                    else:
+                        guard=('The Redraw removes a wall that also bounds a Room the merge does '
+                               'not manage, so it would end up in one region with its neighbour. '
+                               'Leave the wall in the Redraw too.')
+                else:
+                    guard=('The Redraw removes a wall that still separates %s, so they would '
+                           'end up in one region. Delete one of them in the Redraw, or leave '
+                           'the wall in the Redraw too.'%(', '.join(names)))
                 break
         for n in affected:
             for source in (m,r):
@@ -1387,15 +1451,23 @@ try:
     b=bases(payload);mark('baseline')
     m=collect(doc,None,qa,'Main',loc);mark('Main collect')
     r=collect(rdoc,None,qa,'Redraw',loc);mark('Redraw collect')
+    main_protected,main_dupes=collect_exclusions(doc,qa,'Main',loc)
+    redraw_protected,redraw_dupes=collect_exclusions(rdoc,qa,'Redraw',loc)
+    protected=main_protected|redraw_protected;duplicates=main_dupes|redraw_dupes
+    mark('collect exclusions')
 
     redraw_all=wall_records(list(collect_walls(rdoc,None).values()));mark('Redraw wall scan')
-    gplan,pplan=plan_clusters(b,m,r,redraw_all,tol,sp,redraw_wins,qa,issues);mark('plan')
+    gplan,pplan=plan_clusters(b,m,r,redraw_all,tol,sp,redraw_wins,qa,issues,
+                              protected,duplicates);mark('plan')
     # The tag types and views the model already uses, read before anything is
     # merged so a new stand's tags match what is there now.
     tag_templates=room_tag_templates(doc)
 
     # ---- parameters, as before ----
     for n in sorted(set(b)|set(m)|set(r)):
+        if n in duplicates:
+            # The cluster is quarantined, so its parameters stay as Main has them.
+            continue
         if n in b and n in m and n in r:
             for pn in PARAMS:
                 rel,bv,mv,rv=prel(b[n].get('parameters',{}).get(pn),m[n].get('parameters',{}).get(pn),r[n].get('parameters',{}).get(pn))

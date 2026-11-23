@@ -49,6 +49,17 @@ def install_stubs():
 
     revit.ElementId = ElementId
 
+    class SpatialElementBoundaryLocation(object):
+        Center = 'Center'
+        Finish = 'Finish'
+
+    revit.SpatialElementBoundaryLocation = SpatialElementBoundaryLocation
+
+    class BuiltInCategory(object):
+        OST_Rooms = -2000169
+
+    revit.BuiltInCategory = BuiltInCategory
+
     class TransactionStatus(object):
         Committed = 'Committed'
         RolledBack = 'RolledBack'
@@ -218,11 +229,57 @@ def check(condition, message):
         FAILURES.append(message)
 
 
-def plan(base, main, redraw, redraw_wins=False, redraw_walls=None):
+def plan(base, main, redraw, redraw_wins=False, redraw_walls=None,
+         protected=None, duplicates=None):
     issues = []
     gplan, pplan = graph2.plan_clusters(base, main, redraw, redraw_walls or [],
-                                        0.03, 0.25, redraw_wins, [], issues)
+                                        0.03, 0.25, redraw_wins, [], issues,
+                                        protected, duplicates)
     return gplan, pplan, issues
+
+
+class FakeBoundarySegment(object):
+    def __init__(self, element_id):
+        self.ElementId = graph2.ElementId(element_id)
+
+
+class FakeRoom(object):
+    """A Room that only has what collect_exclusions() reads."""
+
+    def __init__(self, number, element_id, wall_ids):
+        self.Number = number
+        self.Id = graph2.ElementId(element_id)
+        self.wall_ids = list(wall_ids)
+
+    def GetBoundarySegments(self, options):
+        return [[FakeBoundarySegment(wall_id) for wall_id in self.wall_ids]]
+
+
+class FakeRooms(object):
+    """The filtered collector graph2 asks for Rooms, over a fixed list."""
+
+    def __init__(self, rooms):
+        self.rooms = rooms
+
+    def OfCategory(self, category):
+        return self
+
+    def WhereElementIsNotElementType(self):
+        return self
+
+    def ToElements(self):
+        return self.rooms
+
+
+def collect_exclusions(rooms, label='Main'):
+    original = graph2.FilteredElementCollector
+    graph2.FilteredElementCollector = lambda document: FakeRooms(rooms)
+    qa = []
+    try:
+        protected, duplicates = graph2.collect_exclusions(object(), qa, label)
+    finally:
+        graph2.FilteredElementCollector = original
+    return protected, duplicates, qa
 
 
 # --------------------------------------------------------------------------
@@ -465,6 +522,65 @@ def test_wall_between_a_surviving_and_a_removed_stand_is_allowed():
           'removing the wall when the other stand goes is fine, got %r'
           % gplan[0].get('reason'))
     check(gplan[0]['walls_deleted'] == 1, 'only the shared wall should be deleted')
+
+
+def test_blank_numbered_room_protects_its_walls():
+    """A Room with no Number is skipped by collect(), so a wall it shares with
+    a stand looks unused. Deleting it would put both Rooms in one region."""
+    shared = Curve(10, 0, 10, 10)
+    outer = Curve(20, 0, 20, 10)
+    blank_outer = Curve(20, 10, 20, 20)
+    rooms = [FakeRoom('A01', 1, [10, 11]), FakeRoom('', 2, [10, 12])]
+    protected, duplicates, qa = collect_exclusions(rooms)
+    check(protected == {10, 12},
+          'only the blank Room boundaries should be protected, got %s' % protected)
+    check(duplicates == set(), 'one blank Room is not a duplicate, got %s' % duplicates)
+    check(any('blank Room Number' in line and 'element 2' in line for line in qa),
+          'the QA should name the blank Room, got %s' % qa)
+
+    base = {'A01': stand('A01', [(10, shared), (11, outer)], 1)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(11, outer)], 1)}
+    inventory = graph2.wall_records([descriptor(11, outer), descriptor(12, blank_outer)])
+    # Without the protection the merge would delete the shared wall.
+    unprotected, _, _ = plan(base, main, redraw, redraw_walls=inventory)
+    check(unprotected[0]['status'] == 'PLANNED',
+          'the test needs the wall to be deleted without protection, got %r'
+          % unprotected[0].get('status'))
+    gplan, pplan, issues = plan(base, main, redraw, redraw_walls=inventory,
+                                protected=protected)
+    check(gplan[0]['status'] == 'SKIPPED',
+          'a wall shared with a blank Room must not be deleted, got %r'
+          % gplan[0].get('status'))
+    check('one region' in gplan[0].get('reason', ''),
+          'the reason should say why, got %r' % gplan[0].get('reason'))
+
+
+def test_duplicate_room_number_quarantines_its_cluster():
+    """Two Rooms with the same Number cannot be told apart, so the cluster is
+    skipped before any plan is built."""
+    rooms = [FakeRoom('A01', 1, [10]), FakeRoom('A01', 2, [10])]
+    protected, duplicates, qa = collect_exclusions(rooms)
+    check(duplicates == {'A01'}, 'the duplicate Number should be reported, got %s'
+          % duplicates)
+    check(protected == {10}, 'the duplicate Rooms walls should be protected, got %s'
+          % protected)
+    check(any('duplicate Room Number' in line and 'A01' in line for line in qa),
+          'the QA should name the duplicate Number, got %s' % qa)
+
+    base = {'A01': stand('A01', [(10, Curve(0, 0, 10, 0))], 1)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(10, Curve(0, 2, 10, 2))], 1)}
+    gplan, pplan, issues = plan(base, main, redraw, duplicates=duplicates)
+    check(len(gplan) == 1, 'the cluster should be reported, got %d' % len(gplan))
+    check(gplan[0]['status'] == 'SKIPPED', 'the cluster should be quarantined, got %r'
+          % gplan[0].get('status'))
+    check('A01' in gplan[0].get('reason', '') and 'Duplicate' in gplan[0].get('reason', ''),
+          'the reason should name the duplicate Number, got %r'
+          % gplan[0].get('reason'))
+    check(len(issues) == 1 and issues[0]['type'] == 'DUPLICATE ROOM NUMBER',
+          'one issue should be reported, got %s' % issues)
+    check('_plan' not in gplan[0], 'a quarantined cluster must not be planned')
 
 
 def test_unplaced_stand_in_the_redraw_is_removed():
