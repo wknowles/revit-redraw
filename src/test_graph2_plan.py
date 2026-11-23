@@ -989,6 +989,36 @@ def test_main_removed_stand_is_reported():
           'the reason should name the Redraw, got %r' % reported[0]['reason'])
 
 
+def test_unchanged_attributes_are_already():
+    """Identical geometry and identical wall attributes is nothing to do."""
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = dict(base)
+    redraw = dict(base)
+    check(graph2.stand_status(base['A'], main['A'], redraw['A'], 0.03, 0.25) == 'ALREADY',
+          'a stand with the same geometry and attributes should be ALREADY')
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(gplan == [], 'nothing should be planned, got %s' % gplan)
+
+
+def test_wall_type_change_without_moving_is_planned():
+    """A wall whose type changed but whose boundary did not move is still a
+    change: the stand is AFFECTED and the wall is replaced. Reporting ALREADY
+    would silently drop the designer's edit."""
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    redraw = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    redraw['A']['wall_loops'][0][0]['type'] = 'Open Wall - RX'
+    check(graph2.stand_status(base['A'], main['A'], redraw['A'], 0.03, 0.25) == 'AFFECTED',
+          'a wall type change without a move should be AFFECTED')
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
+    check(gplan[0]['status'] == 'PLANNED', 'it should be planned, got %r'
+          % gplan[0].get('status'))
+    replaced = [wall['ref']['element_id'] for wall, _ in gplan[0]['_plan']['replace']]
+    check(replaced == [11],
+          'the wall with the new type should be replaced, got %s' % replaced)
+
+
 def test_dry_run_keeps_a_skipped_cluster_visible():
     """A dry run must not relabel a blocked cluster as PLANNED."""
     shared = Curve(10, 0, 10, 10)

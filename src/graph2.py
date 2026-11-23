@@ -680,6 +680,23 @@ def state_walls(state):
     return out
 
 
+def state_attribute_set(state):
+    """The attributes of every wall bounding a state, sorted.
+
+    Two states whose boundaries match geometrically can still differ: a wall
+    can keep its position while its type, height, offset, flip or level
+    changes. Comparing these sets catches that without moving anything.
+    """
+    if state is None:
+        return ()
+    try:
+        attributes = [wall_attributes(wd) for wd in state_walls(state).values()]
+        # repr keeps the sort total even if one wall is missing a value.
+        return tuple(sorted(attributes, key=repr))
+    except Exception:
+        return ()
+
+
 def collect_walls(doc, tr=None):
     """Every wall in a document, not only the ones that bound a room.
 
@@ -784,7 +801,12 @@ def stand_status(base, main, redraw, tol, sp):
     # and the two baseline comparisons can be skipped.
     mr = geom(main, redraw, tol, sp)
     if mr == 'UNCHANGED':
-        return 'ALREADY'
+        # The boundary is the same, but the Redraw may have changed a wall's
+        # type, height, offset, flip or level without moving it. That is still
+        # a change, and plan_component will replace the wall.
+        if state_attribute_set(main) == state_attribute_set(redraw):
+            return 'ALREADY'
+        return 'AFFECTED'
     gm = geom(base, main, tol, sp) if base is not None else 'ADDED'
     gr = geom(base, redraw, tol, sp) if base is not None else 'ADDED'
     if gr == 'UNCHANGED':
