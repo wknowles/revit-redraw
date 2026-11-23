@@ -831,6 +831,71 @@ def test_failing_cluster_rolls_back_while_the_next_one_commits():
           % deleted)
 
 
+def test_stand_status_distinguishes_both_removed():
+    """Baseline-only is not 'new in Main': both documents dropped the stand."""
+    baseline = stand('A01', [(11, Curve(0, 0, 10, 0))], 1)
+    main = stand('A01', [(11, Curve(0, 0, 10, 0))], 1)
+    check(graph2.stand_status(baseline, None, None, 0.03, 0.25) == 'BOTH_REMOVED',
+          'a stand gone from both documents should be BOTH_REMOVED')
+    check(graph2.stand_status(baseline, main, None, 0.03, 0.25) == 'REMOVED',
+          'a stand only Main dropped should stay REMOVED')
+    check(graph2.stand_status(None, main, None, 0.03, 0.25) == 'MAIN_ONLY',
+          'a stand new in Main should stay MAIN_ONLY')
+
+
+def test_main_removed_stand_is_reported():
+    """Main deleting a stand the Redraw keeps must reach the operator."""
+    curve = Curve(0, 0, 10, 0)
+    base = {'A01': stand('A01', [(11, curve)], 1)}
+    redraw = {'A01': stand('A01', [(11, curve)], 1)}
+    gplan, pplan, issues = plan(base, {}, redraw)
+    check(not gplan, 'nothing can be merged for a stand Main removed, got %s' % gplan)
+    reported = [i for i in issues if i.get('type') == 'MAIN REMOVED']
+    check(len(reported) == 1 and reported[0]['stand'] == 'A01',
+          'the removed stand should be reported once, got %s' % issues)
+    check('Redraw' in reported[0]['reason'],
+          'the reason should name the Redraw, got %r' % reported[0]['reason'])
+
+
+def test_dry_run_keeps_a_skipped_cluster_visible():
+    """A dry run must not relabel a blocked cluster as PLANNED."""
+    shared = Curve(10, 0, 10, 10)
+    base = {'A01': stand('A01', [(10, shared), (11, Curve(0, 0, 10, 0))], 1),
+            'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
+              'A02': stand('A02', [(12, Curve(20, 0, 20, 10))], 2)}
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(gplan[0]['status'] == 'SKIPPED', 'the cluster should be skipped')
+    reason = gplan[0]['reason']
+    gout = graph2.public_plan(gplan)
+    check(gout[0]['status'] == 'SKIPPED',
+          'the dry run should keep the skipped status, got %r' % gout[0]['status'])
+    check(gout[0].get('reason') == reason,
+          'the dry run should keep the reason, got %r' % gout[0].get('reason'))
+    check(not any(key.startswith('_') for key in gout[0]),
+          'the private working keys should be gone, got %s' % sorted(gout[0]))
+
+
+def test_only_skipped_clusters_report_warnings():
+    """A run where everything was blocked is not a plain SUCCESS."""
+    shared = Curve(10, 0, 10, 10)
+    base = {'A01': stand('A01', [(10, shared), (11, Curve(0, 0, 10, 0))], 1),
+            'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
+              'A02': stand('A02', [(12, Curve(20, 0, 20, 10))], 2)}
+    gplan, pplan, issues = plan(base, main, redraw)
+    gout = graph2.public_plan(gplan)
+    status, message, failed, skipped, conflicts = graph2.judge_run([], gout, issues)
+    check(status == 'SUCCESS WITH WARNINGS',
+          'a run with only skipped clusters should warn, got %r' % status)
+    check(failed == 0 and skipped == 1,
+          'the counts should be failed=0 skipped=1, got failed=%d skipped=%d'
+          % (failed, skipped))
+    check(message, 'the summary should say why the run is not clean')
+
+
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]

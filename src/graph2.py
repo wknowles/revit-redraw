@@ -718,9 +718,12 @@ def stand_status(base, main, redraw, tol, sp):
     REMOVED       the Redraw deleted it.
     MAIN_ONLY     it is new in Main, after the Redraw was cut - leave it alone.
     MAIN_REMOVED  Main deleted it after the Redraw was cut.
+    BOTH_REMOVED  Main and the Redraw both dropped a stand the baseline had.
     """
     if redraw is None:
-        if base is not None and main is not None:
+        if main is None:
+            return 'BOTH_REMOVED'
+        if base is not None:
             return 'REMOVED'
         return 'MAIN_ONLY'
     if main is None:
@@ -1139,6 +1142,11 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
     statuses={}
     for n in sorted(set(b)|set(m)|set(r)):
         statuses[n]=stand_status(b.get(n),m.get(n),r.get(n),tol,sp)
+        if statuses[n]=='MAIN_REMOVED':
+            # Nothing in the merge touches it, but Main has lost a stand the
+            # Redraw still draws, so the operator must hear about it.
+            issues.append({'stand':n,'type':'MAIN REMOVED',
+                           'reason':'Main no longer has this stand but the Redraw does'})
 
     # cluster the stands: neighbours share a wall
     usage={}
@@ -1322,6 +1330,52 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
         gplan.append(op)
 
     return gplan,pplan
+
+
+PRIVATE_KEYS=('_plan','_rooms','_level','_want','_target')
+
+
+def public_plan(entries):
+    """The plan entries as the watches and the audit should see them.
+
+    Only the private working keys are dropped. A cluster the planner skipped
+    stays SKIPPED, with its reason, or the dry run would report a blocked
+    cluster as mergeable.
+    """
+    out=[]
+    for op in entries:
+        for key in PRIVATE_KEYS:
+            op.pop(key,None)
+        out.append(op)
+    return out
+
+
+def judge_run(pout, gout, issues):
+    """The headline status of a run, and the first reason it is not clean.
+
+    Returns (status, message, failed, skipped, conflicts). Skipped clusters and
+    conflicts are warnings, not errors: the run finished, but not everything
+    could be merged, so the Summary must not say SUCCESS on its own.
+    """
+    failed=sum(1 for x in pout+gout if x['status'] in ('FAILED','VERIFY_FAILED'))
+    skipped=[x for x in pout+gout if x['status']=='SKIPPED']
+    conflicts=[x for x in issues if 'CONFLICT' in x.get('type','')]
+    if failed:
+        status='COMPLETED WITH ERRORS'
+    elif skipped or conflicts:
+        status='SUCCESS WITH WARNINGS'
+    else:
+        status='SUCCESS'
+    reasons=[x.get('reason') for x in skipped+conflicts if x.get('reason')]
+    if failed:
+        message='%d change(s) failed; see QA'%failed
+    elif reasons:
+        message=reasons[0]
+    elif skipped or conflicts:
+        message='%d cluster(s) skipped, %d conflict(s)'%(len(skipped),len(conflicts))
+    else:
+        message='Nothing was blocked'
+    return status,message,failed,len(skipped),len(conflicts)
 
 
 def apply_cluster(doc,op,m,r,tag_templates,qa):
@@ -1510,10 +1564,8 @@ try:
     preview_note=None
 
     if not apply:
-        for op in pplan:op.pop('_target',None);pout.append(op)
-        for op in gplan:
-            op.pop('_plan',None);op.pop('_rooms',None);op.pop('_level',None);op.pop('_want',None)
-            op['status']='PLANNED';gout.append(op)
+        pout=public_plan(pplan)
+        gout=public_plan(gplan)
         # Draw the visual diff so the plan can be checked on the plan. The old
         # preview goes in the same transaction, so one Ctrl+Z takes the whole
         # preview off the plan.
@@ -1642,15 +1694,15 @@ try:
         qa.append('AUDIT TRAIL: '+str(ex))
     mark('audit')
 
-    hard_fail=sum(1 for x in pout+gout if x['status'] in ('FAILED','VERIFY_FAILED'))
-    summary={'Status':'SUCCESS' if hard_fail==0 else 'COMPLETED WITH ERRORS','Mode':'APPLIED' if apply else 'DRY RUN',
+    status,message,hard_fail,skipped,conflicts=judge_run(pout,gout,issues)
+    summary={'Status':status,'Message':message,'Mode':'APPLIED' if apply else 'DRY RUN',
              'Clusters':sum(1 for x in gout if x['status'] in ('PLANNED','VERIFIED')),
              'Parameters':sum(1 for x in pout if x['status'] in ('PLANNED','VERIFIED')),
              'Geometry':sum(1 for x in gout if x['status'] in ('PLANNED','VERIFIED')),
              'Rooms created':sum(x.get('rooms_created',0) for x in gout),
-             'Skipped':sum(1 for x in pout+gout if x['status']=='SKIPPED'),
+             'Skipped':skipped,
              'Errors':hard_fail,
-             'Conflicts':sum(1 for x in issues if 'CONFLICT' in x.get('type','')),
+             'Conflicts':conflicts,
              'Redraw document closed':'YES' if rdoc_closed else 'NO',
              'Preview':preview_note if preview_note else ('not drawn in apply mode'
                                                           if apply else 'NOT DRAWN'),
