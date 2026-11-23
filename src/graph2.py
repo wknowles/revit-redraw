@@ -43,9 +43,9 @@ import clr, os, json, math, re, time, uuid
 clr.AddReference('RevitAPI'); clr.AddReference('RevitServices')
 from Autodesk.Revit.DB import (Arc, Line, XYZ, Wall, LocationCurve, LocationPoint, BuiltInParameter,
  BuiltInCategory, FilteredElementCollector, LinkElementId, FilePath, OpenOptions,
- Transaction, SpatialElementBoundaryOptions, SpatialElementBoundaryLocation,
- UnitTypeId, UnitUtils, StorageType, ElementId, Level, View, Color, CurveLoop,
- DirectShape, GeometryCreationUtilities, OverrideGraphicSettings, UV)
+ Transaction, SubTransaction, TransactionStatus, SpatialElementBoundaryOptions,
+ SpatialElementBoundaryLocation, UnitTypeId, UnitUtils, StorageType, ElementId, Level, View,
+ Color, CurveLoop, DirectShape, GeometryCreationUtilities, OverrideGraphicSettings, UV)
 from RevitServices.Persistence import DocumentManager
 
 doc=DocumentManager.Instance.CurrentDBDocument
@@ -1219,6 +1219,21 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
             for wall in plan['create']+[w for _,w in plan['replace']]:
                 if wall['ref'].get('type') not in RX_TYPES:
                     guard='Unsupported Redraw wall type: '+str(wall['ref'].get('type'));break
+        # Preflight. The apply loop deletes before it creates, so a cluster that
+        # is certain to fail part way through must be skipped here instead: the
+        # wall type has to exist in Main, and the build level has to resolve.
+        if guard is None:
+            types=wall_types(doc)
+            for wall in plan['create']+[w for _,w in plan['replace']]:
+                name=wall['ref'].get('type')
+                if name not in types:
+                    guard=('Wall type not found in Main: %s. Create that wall type in Main, '
+                           'or use a wall type Main already has.'%name)
+                    break
+        level=component_level(affected,m,r,doc)
+        if guard is None and (level is None or eidv(level)<=0):
+            guard=('No level in Main for this cluster. Put the stand on a level that exists '
+                   'in Main, or add the missing level to Main.')
         if guard is not None:
             op['status']='SKIPPED';op['reason']=guard
             for n in comp:
@@ -1226,7 +1241,7 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
                           %(cid,n,where(b.get(n)),where(m.get(n)),where(r.get(n))))
             gplan.append(op);continue
         op['_plan']=plan
-        op['_level']=component_level(affected,m,r,doc)
+        op['_level']=level
         op['_want']={n:state_loop_points(r[n]) for n in affected if n in r and r[n].get('loops')}
         rooms=[]
         for n in affected:
@@ -1241,6 +1256,94 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
         gplan.append(op)
 
     return gplan,pplan
+
+
+def apply_cluster(doc,op,m,r,tag_templates,qa):
+    """Apply one planned cluster in a sub-transaction of the merge.
+
+    The sub-transaction is what keeps a cluster atomic: on any failure every
+    edit it made is rolled back, so a cluster that fails after deleting a room
+    cannot leave the deletion behind. The outer merge transaction still ends
+    the run as one step, so a single Ctrl+Z puts Main back.
+    """
+    plan=op['_plan']
+    sub=SubTransaction(doc)
+    try:
+        sub.Start()
+        written=0;moved=0;tags=0;added=0;gone=0
+        # Rooms the Redraw deleted go first. Removing a shared wall while both
+        # rooms still exist puts two rooms in one region, and Revit's answer to
+        # that is a modal warning that edits the document outside this
+        # transaction.
+        for action,number in op['_rooms']:
+            if action=='DELETE':
+                doc.Delete(ElementId(m[number]['element_id']));gone+=1
+        # Only regenerate when the step before it changed something: a
+        # regeneration is the most expensive call in the loop and most
+        # clusters do not need all three.
+        if gone:doc.Regenerate()
+        for wall in plan['delete']:doc.Delete(ElementId(wall['ref']['element_id']))
+        for wall,redraw_wall in plan['replace']:doc.Delete(ElementId(wall['ref']['element_id']))
+        if plan['delete'] or plan['replace']:doc.Regenerate()
+        level_id=op['_level']
+        for wall in plan['create']:create_wall(doc,level_id,wall['ref'])
+        for wall,redraw_wall in plan['replace']:create_wall(doc,level_id,redraw_wall['ref'])
+        if plan['create'] or plan['replace']:doc.Regenerate()
+        for action,number in op['_rooms']:
+            if action=='ADD':
+                redraw_state=r.get(number)
+                if redraw_state is None:raise Exception('No Redraw Room for stand '+str(number))
+                values={}
+                for pn in PARAMS:
+                    # A parameter is a dict of status and value, not a pair,
+                    # so it has to be read by name.
+                    pv=redraw_state.get('parameters',{}).get(pn)
+                    if not isinstance(pv,dict):continue
+                    if pv.get('status')!='VALUE':continue
+                    if pv.get('value') is None:continue
+                    values[pn]=pv.get('value')
+                level=find_level_by_name(doc,redraw_state.get('level_name'))
+                if level is None:raise Exception('Level not found in Main: '+str(redraw_state.get('level_name')))
+                room,params=create_room(doc,level,redraw_state,number,values)
+                written+=len(params);added+=1
+                missing=[pn for pn in PARAMS if pn not in values]
+                if missing:
+                    qa.append('Stand %s: %d of the 6 merged parameters are blank in the '
+                              'Redraw and were not written (%s)'
+                              %(number,len(missing),', '.join(missing)))
+                point=None
+                try:
+                    if isinstance(room.Location,LocationPoint):point=room.Location.Point
+                except Exception:
+                    point=None
+                if point is None:
+                    point=redraw_state.get('room_point') or redraw_state.get('centroid')
+                if point is not None:
+                    tags+=create_room_tags(doc,room,tag_templates,point,qa,'Stand '+number)
+                else:
+                    qa.append('Stand %s: no location point, so no room tag was created'%number)
+            elif action=='MOVE':
+                room=m[number]['room']
+                tag_ids=room_tag_ids(doc,room)
+                target=move_room_to_redraw(room,r[number])
+                moved+=1
+                tmoved,tag_errors=centre_room_tags(doc,tag_ids,target)
+                tags+=tmoved
+        status=sub.Commit()
+        if status!=TransactionStatus.Committed:
+            raise Exception('Cluster sub-transaction did not commit: '+str(status))
+        op['params_written']=written;op['rooms_moved']=moved;op['tags_moved']=tags
+        op['rooms_created']=added;op['rooms_deleted']=gone
+        op['status']='APPLIED'
+        qa.append('CLUSTER %s applied: %d wall(s) deleted, %d created, %d kept; '
+                  '%d room(s) moved, %d created, %d deleted; %d tag(s) moved or created; '
+                  '%d parameter(s) written'
+                  %(op['cluster'],len(plan['delete']),len(plan['create']),len(plan['keep']),
+                    moved,added,gone,tags,written))
+    except Exception as e:
+        try:sub.RollBack()
+        except Exception:pass
+        op['status']='FAILED';op['reason']=str(e)
 
 
 qa=[];pout=[];gout=[];issues=[];summary={'Status':'FAILED'}
@@ -1347,7 +1450,9 @@ try:
             cleared=clear_preview(doc,qa)
             z=preview_height(m,gplan)
             drawn,recoloured=draw_preview(doc,view,bands,recolour,z,qa)
-            preview_tx.Commit()
+            committed=preview_tx.Commit()
+            if committed!=TransactionStatus.Committed:
+                raise Exception('Preview transaction did not commit: '+str(committed))
             preview_note=('Preview drawn: %d band(s) (%d blue, %d amber, %d red), %d wall(s) recoloured.'%(
                 drawn,
                 sum(1 for b2 in bands if b2[1]==PREVIEW_BLUE),
@@ -1371,7 +1476,9 @@ try:
         try:
             preview_tx.Start()
             cleared=clear_preview(doc,qa)
-            preview_tx.Commit()
+            committed=preview_tx.Commit()
+            if committed!=TransactionStatus.Committed:
+                raise Exception('The preview clear transaction did not commit: '+str(committed))
             preview_note='Preview cleared: %d element(s) and %d override(s).'%(
                 cleared['elements'],cleared['overrides'])
             qa.append(preview_note)
@@ -1384,77 +1491,7 @@ try:
             tx.Start()
             for op in gplan:
                 if op['status']!='PLANNED':continue
-                plan=op['_plan']
-                try:
-                    written=0;moved=0;tags=0;added=0;gone=0
-                    # Rooms the Redraw deleted go first. Removing a shared wall
-                    # while both rooms still exist puts two rooms in one region,
-                    # and Revit's answer to that is a modal warning that edits
-                    # the document outside this transaction.
-                    for action,number in op['_rooms']:
-                        if action=='DELETE':
-                            doc.Delete(ElementId(m[number]['element_id']));gone+=1
-                    # Only regenerate when the step before it changed
-                    # something: a regeneration is the most expensive call in
-                    # the loop and most clusters do not need all three.
-                    if gone:doc.Regenerate()
-                    for wall in plan['delete']:doc.Delete(ElementId(wall['ref']['element_id']))
-                    for wall,redraw_wall in plan['replace']:doc.Delete(ElementId(wall['ref']['element_id']))
-                    if plan['delete'] or plan['replace']:doc.Regenerate()
-                    level_id=op['_level']
-                    for wall in plan['create']:create_wall(doc,level_id,wall['ref'])
-                    for wall,redraw_wall in plan['replace']:create_wall(doc,level_id,redraw_wall['ref'])
-                    if plan['create'] or plan['replace']:doc.Regenerate()
-                    for action,number in op['_rooms']:
-                        if action=='ADD':
-                            redraw_state=r.get(number)
-                            if redraw_state is None:raise Exception('No Redraw Room for stand '+str(number))
-                            values={}
-                            for pn in PARAMS:
-                                # A parameter is a dict of status and value, not a
-                                # pair, so it has to be read by name.
-                                pv=redraw_state.get('parameters',{}).get(pn)
-                                if not isinstance(pv,dict):continue
-                                if pv.get('status')!='VALUE':continue
-                                if pv.get('value') is None:continue
-                                values[pn]=pv.get('value')
-                            level=find_level_by_name(doc,redraw_state.get('level_name'))
-                            if level is None:raise Exception('Level not found in Main: '+str(redraw_state.get('level_name')))
-                            room,params=create_room(doc,level,redraw_state,number,values)
-                            written+=len(params);added+=1
-                            missing=[pn for pn in PARAMS if pn not in values]
-                            if missing:
-                                qa.append('Stand %s: %d of the 6 merged parameters are blank in the '
-                                          'Redraw and were not written (%s)'
-                                          %(number,len(missing),', '.join(missing)))
-                            point=None
-                            try:
-                                if isinstance(room.Location,LocationPoint):point=room.Location.Point
-                            except Exception:
-                                point=None
-                            if point is None:
-                                point=redraw_state.get('room_point') or redraw_state.get('centroid')
-                            if point is not None:
-                                tags+=create_room_tags(doc,room,tag_templates,point,qa,'Stand '+number)
-                            else:
-                                qa.append('Stand %s: no location point, so no room tag was created'%number)
-                        elif action=='MOVE':
-                            room=m[number]['room']
-                            tag_ids=room_tag_ids(doc,room)
-                            target=move_room_to_redraw(room,r[number])
-                            moved+=1
-                            tmoved,tag_errors=centre_room_tags(doc,tag_ids,target)
-                            tags+=tmoved
-                    op['params_written']=written;op['rooms_moved']=moved;op['tags_moved']=tags
-                    op['rooms_created']=added;op['rooms_deleted']=gone
-                    op['status']='APPLIED'
-                    qa.append('CLUSTER %s applied: %d wall(s) deleted, %d created, %d kept; '
-                              '%d room(s) moved, %d created, %d deleted; %d tag(s) moved or created; '
-                              '%d parameter(s) written'
-                              %(op['cluster'],len(plan['delete']),len(plan['create']),len(plan['keep']),
-                                moved,added,gone,tags,written))
-                except Exception as e:
-                    op['status']='FAILED';op['reason']=str(e)
+                apply_cluster(doc,op,m,r,tag_templates,qa)
             for op in pplan:
                 p=m[op['stand']]['room'].LookupParameter(op['parameter'])
                 if p is None:op['status']='SKIPPED';op['reason']='Parameter not found in Main'
@@ -1463,7 +1500,9 @@ try:
                 else:
                     try:op['status']='APPLIED' if p.Set(op['_target']) else 'FAILED'
                     except Exception as e:op['status']='FAILED';op['reason']=str(e)
-            tx.Commit()
+            committed=tx.Commit()
+            if committed!=TransactionStatus.Committed:
+                raise Exception('Merge transaction did not commit: '+str(committed))
         except:
             try:tx.RollBack()
             except:pass

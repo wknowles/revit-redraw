@@ -25,7 +25,8 @@ REVIT_NAMES = [
     'BuiltInCategory', 'FilteredElementCollector', 'LinkElementId', 'FilePath', 'OpenOptions',
     'Transaction', 'SpatialElementBoundaryOptions', 'SpatialElementBoundaryLocation', 'UnitTypeId',
     'UnitUtils', 'StorageType', 'ElementId', 'Level', 'View', 'Color', 'CurveLoop', 'DirectShape',
-    'GeometryCreationUtilities', 'OverrideGraphicSettings', 'UV',
+    'GeometryCreationUtilities', 'OverrideGraphicSettings', 'UV', 'WallType',
+    'SubTransaction', 'TransactionStatus',
 ]
 
 
@@ -47,6 +48,39 @@ def install_stubs():
             return hash(self.Value)
 
     revit.ElementId = ElementId
+
+    class TransactionStatus(object):
+        Committed = 'Committed'
+        RolledBack = 'RolledBack'
+        Error = 'Error'
+
+    class SubTransaction(object):
+        """Records the calls, so a test can see whether a cluster committed
+        or rolled back."""
+        calls = []
+
+        def __init__(self, document):
+            self.document = document
+
+        def Start(self):
+            SubTransaction.calls.append('start')
+
+        def Commit(self):
+            SubTransaction.calls.append('commit')
+            return TransactionStatus.Committed
+
+        def RollBack(self):
+            SubTransaction.calls.append('rollback')
+
+    revit.TransactionStatus = TransactionStatus
+    revit.SubTransaction = SubTransaction
+
+    class WallType(object):
+        def __init__(self, name):
+            self.Name = name
+            self.Id = ElementId(1)
+
+    revit.WallType = WallType
 
     persistence = types.ModuleType('RevitServices.Persistence')
 
@@ -71,6 +105,33 @@ def install_stubs():
 install_stubs()
 
 import graph2
+
+
+# --------------------------------------------------------------------------
+# the document's fixtures
+# --------------------------------------------------------------------------
+class FakeLevel(object):
+    def __init__(self, name, element_id=1):
+        self.Name = name
+        self.Id = graph2.ElementId(element_id)
+
+
+WALL_TYPES = ('Closed Wall - RX', 'Open Wall - RX')
+
+
+def use_wall_types(*names):
+    """Prime the Main wall type cache with the names a real document has."""
+    from Autodesk.Revit.DB import WallType
+    graph2._WALL_TYPES[id(graph2.doc)] = dict((name, WallType(name)) for name in names)
+
+
+def use_levels(*names):
+    """Prime the Main level cache, the way filtered collection would fill it."""
+    graph2._LEVELS[id(graph2.doc)] = [FakeLevel(name) for name in names]
+
+
+use_wall_types(*WALL_TYPES)
+use_levels('Level 1')
 
 
 # --------------------------------------------------------------------------
@@ -493,6 +554,87 @@ def test_changed_stand_is_still_measured():
     check(len(moves) >= 1, 'a moved boundary has to be measured')
     check(len(gplan) == 1 and gplan[0]['walls_created'] == 1,
           'the moved wall should still be planned, got %s' % gplan)
+
+
+def test_missing_wall_type_skips_the_cluster_before_any_mutation():
+    """The apply loop deletes before it creates, so a wall type Main does not
+    have would destroy the old wall before create failed. It is caught in
+    planning instead."""
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = dict(base)
+    redraw = {'A': stand('A', [(11, Curve(0, 2, 10, 2))], 1)}
+    use_wall_types('Open Wall - RX')
+    try:
+        gplan, pplan, issues = plan(base, main, redraw)
+    finally:
+        use_wall_types(*WALL_TYPES)
+    check(gplan[0]['status'] == 'SKIPPED',
+          'a wall type Main does not have should skip the cluster, got %r'
+          % gplan[0]['status'])
+    check('Closed Wall - RX' in gplan[0].get('reason', ''),
+          'the reason should name the missing type, got %r' % gplan[0].get('reason'))
+
+
+def test_unresolved_level_skips_the_cluster_before_any_mutation():
+    """A cluster whose build level cannot be resolved would fail on its first
+    create, after its deletes."""
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = dict(base)
+    main['A']['level_id'] = None
+    redraw = {'A': stand('A', [(11, Curve(0, 2, 10, 2))], 1, level_name='Level 9')}
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(gplan[0]['status'] == 'SKIPPED',
+          'a cluster with no build level should be skipped, got %r' % gplan[0]['status'])
+    check('level' in gplan[0].get('reason', '').lower(),
+          'the reason should mention the level, got %r' % gplan[0].get('reason'))
+
+
+def test_failing_cluster_rolls_back_while_the_next_one_commits():
+    """A failure after a delete must not leave the delete behind: the cluster
+    is rolled back, and a cluster that succeeds still commits."""
+    deleted = []
+
+    class Doc(object):
+        def Delete(self, element_id):
+            deleted.append(element_id.Value)
+
+        def Regenerate(self):
+            pass
+
+    doc = Doc()
+    original = graph2.create_wall
+
+    def boom(*args, **kwargs):
+        raise Exception('wall type went missing')
+
+    graph2.create_wall = boom
+    graph2.SubTransaction.calls = []
+    try:
+        bad = {'cluster': 'C1', 'status': 'PLANNED', 'affected': [], 'stands': [],
+               'change': 'CLUSTER', '_level': 1, '_rooms': [],
+               '_plan': {'keep': [], 'retained': [], 'replace': [],
+                         'delete': [{'ref': {'element_id': 11, 'type': 'Closed Wall - RX'}}],
+                         'create': [{'ref': {'element_id': 21, 'type': 'Closed Wall - RX'}}]}}
+        good = {'cluster': 'C2', 'status': 'PLANNED', 'affected': [], 'stands': [],
+                'change': 'CLUSTER', '_level': 1, '_rooms': [],
+                '_plan': {'keep': [], 'retained': [], 'replace': [],
+                          'delete': [], 'create': []}}
+        qa = []
+        graph2.apply_cluster(doc, bad, {}, {}, {}, qa)
+        graph2.apply_cluster(doc, good, {}, {}, {}, qa)
+    finally:
+        graph2.create_wall = original
+    check(bad['status'] == 'FAILED',
+          'the failing cluster should be marked FAILED, got %r' % bad['status'])
+    check('went missing' in bad.get('reason', ''),
+          'the reason should say what failed, got %r' % bad.get('reason'))
+    check(graph2.SubTransaction.calls == ['start', 'rollback', 'start', 'commit'],
+          'the failing cluster should roll back and the next one commit, got %s'
+          % graph2.SubTransaction.calls)
+    check(good['status'] == 'APPLIED',
+          'the successful cluster should be applied, got %r' % good['status'])
+    check(deleted == [11], 'only the failing cluster should have deleted a wall, got %s'
+          % deleted)
 
 
 def main():

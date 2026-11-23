@@ -7311,6 +7311,23 @@
    "kind": "enum",
    "own": []
   },
+  "SubTransaction": {
+   "enum": [],
+   "fqn": "Autodesk.Revit.DB.SubTransaction",
+   "inherited": [],
+   "kind": "class",
+   "own": [
+    "Commit",
+    "Dispose",
+    "GetStatus",
+    "HasEnded",
+    "HasStarted",
+    "IsValidObject",
+    "RollBack",
+    "Start",
+    "SubTransaction"
+   ]
+  },
   "SynchronizeWithCentralOptions": {
    "enum": [],
    "fqn": "Autodesk.Revit.DB.SynchronizeWithCentralOptions",
@@ -7398,6 +7415,21 @@
     "Start",
     "Transaction"
    ]
+  },
+  "TransactionStatus": {
+   "enum": [
+    "Committed",
+    "Error",
+    "Pending",
+    "Proceed",
+    "RolledBack",
+    "Started",
+    "Uninitialized"
+   ],
+   "fqn": "Autodesk.Revit.DB.TransactionStatus",
+   "inherited": [],
+   "kind": "enum",
+   "own": []
   },
   "Transform": {
    "enum": [],
