@@ -12,10 +12,13 @@ Deferred work and known gaps: `ROADMAP.md`.
 2. `2. Compare and Update Redraw.dyn` — run against Main with the Redraw folder:
    three-way compare (baseline vs Main vs Redraw), merge Redraw-only parameter and
    geometry changes back into Main, verify, then close the Redraw document it opened
-   for reading. Nothing is linked into Main, so Undo is one step.
+   for reading. Nothing is linked into Main, so one Ctrl+Z undoes the merge, and
+   each cluster is applied in a sub-transaction, so a cluster that fails is rolled
+   back while the rest of the run stays applied.
 
 Room Number is the stand key and is assumed **globally unique** (business decision).
-Duplicates are errors in graph 1 and skipped-with-QA in graph 2.
+Duplicates are errors in graph 1; graph 2 quarantines a duplicate stand's cluster and
+treats duplicate and blank-Number Rooms as unmanaged.
 
 After graph 1 the Redraw is saved and closed and Main is active. The intended user
 flow is: close Main → open the Redraw → edit/save/close → reopen Main → run graph 2.
@@ -102,9 +105,15 @@ Top level: `schema_version`, `snapshot_type: "REDRAW_BASELINE"`, `baseline_id` (
 
 Inputs: `IN[0]` Redraw directory, `IN[1]` tolerance metres (default 0.01),
 `IN[2]` boundary sample spacing metres (default 0.25), `IN[3]` `Apply Updates`
-(default False in code; saved graph defaults **true**). Metres are converted to
-internal feet via `UnitUtils`. `OUT = (summary, pout, gout, issues, qa)`; all
-five are wired to watches.
+(default False in code and **false in the saved graph**), `IN[4]`
+`Redraw Wins On Conflicts` (default False in code, **true in the saved graph**).
+Metres are converted to internal feet via `UnitUtils`.
+`OUT = (summary, pout, gout, issues, qa)`; all five are wired to watches.
+
+`check_inputs` rejects a blank directory, a tolerance that is not a number or is
+negative, and a spacing that is not a positive number, each with a message that
+names the input. A coarse spacing only warns, and only when it exceeds both
+`8 x tolerance` and the shipped 0.25 m, so the default run is quiet.
 
 ### Pipeline
 1. **Files/active document**: exactly one primary `.rvt` + one `*.baseline.json` in
@@ -128,32 +137,87 @@ five are wired to watches.
    descriptors (type/level/height/offset/flipped/curve), centroid, room point and
    level id and name. The Room Tag types and views already in the model are read
    now (`room_tag_templates`), before anything is merged.
+   A blank-Numbered Room is skipped and a duplicate Number is quarantined by
+   `collect`; `collect_exclusions` then reads those unmanaged Rooms' boundaries so
+   every wall they share is protected from deletion.
 5. **Classify** every stand (`stand_status`): `UNCHANGED`, `ALREADY`, `CONFLICT`,
-   `AFFECTED`, `ADDED`, `REMOVED`, `MAIN_ONLY`, `MAIN_REMOVED`. `ALREADY` means
-   Main already is what the Redraw wants - that is not a conflict.
+   `AFFECTED`, `ADDED`, `REMOVED`, `MAIN_ONLY`, `MAIN_REMOVED`, `BOTH_REMOVED`.
+   `ALREADY` means Main already is what the Redraw wants - that is not a conflict.
+   `ALREADY` also requires the wall attributes to match, so a wall that changed
+   type/height/offset/flip/level without moving is `AFFECTED`. `BOTH_REMOVED`
+   means neither Main nor the Redraw has a stand the baseline did; `MAIN_REMOVED`
+   is reported in `issues` because Main lost a stand the Redraw still draws.
 6. **Cluster** the stands: two stands are neighbours when they share a wall, in
    Main or in the Redraw (`state_wall_usage` -> `adjacency_from_wall_usage` ->
    `find_components`). The affected set is already closed over shared walls, so a
    cluster needs no separate algorithm.
 7. **Plan** each affected cluster (`plan_component`, in `src/merge_core.py`):
    keep / replace / delete / create the walls, and list the room work - move the
-   location point, create an added stand, delete a removed stand. Walls that Main
+   location point, create an added stand, delete a removed stand. Every stand of
+   the cluster contributes its walls, not only the affected ones, so a wall shared
+   with an unchanged neighbour is matched instead of duplicated. Walls that Main
    added after the Redraw was cut are retained; walls Main removed are conflicts.
    A cluster with a conflict is skipped unless `Redraw Wins On Conflicts` is set.
-   The RX wall type rule and the "boundary must be made of walls" rule are
-   checked here.
-8. **Preview** (dry run, one transaction `Redraw Merge Preview`) or **Apply** (two
-   transactions: `Redraw Merge - Clear Preview`, then `MVP2.4B6 - Merge Redraw
-   Updates`): delete the walls to go, create the walls to come, then create, delete
-   and move the rooms, tag the added stands, and write the parameters. After the
-   commit, re-collect Main and verify each cluster against the Redraw. The merge is
-   the only transaction that edits Main, so one Ctrl+Z puts Main back exactly where
-   it was; the preview cleanup runs first in its own transaction so undoing the
-   merge does not bring the bands back.
+   The planner then applies the gates below before anything is touched.
+8. **Preview** (dry run, one transaction `Redraw Merge Preview`, which also
+   clears the previous preview) or **Apply** (two transactions: `Redraw Merge -
+   Clear Preview`, then `MVP2.4B6 - Merge Redraw Updates`): delete the walls to
+   go, create the walls to come, then create, delete and move the rooms, tag the
+   added stands, and write the parameters. Each cluster is applied by
+   `apply_cluster` in a `SubTransaction` of the merge transaction: every edit of
+   that cluster commits together, or a failure rolls the whole cluster back and
+   marks it `FAILED`, while the other clusters still commit. Every `Commit()` is
+   checked against `TransactionStatus.Committed` (preview, preview clear, each
+   cluster, the merge), and a commit that does not return `Committed` aborts the
+   run. After the merge commit, re-collect Main and verify each cluster against
+   the Redraw.
+   Undo is one Ctrl+Z on the merge transaction, so the applied clusters go away
+   together; the preview-clear transaction commits first, so undo does not bring
+   the bands back. A cluster that rolled back was never applied, so undo does not
+   have to remove it.
 9. **Close the Redraw** (`close_redraw` in `finally`): the document is closed
    whatever happened, and Main is activated again.
-10. **Audit trail**: every run appends to `<title>.merge-log.csv` and rewrites
-    `<title>.merge-summary.csv` next to the Redraw.
+10. **Audit trail**: see the section below.
+
+### Safety gates in the planner
+`plan_clusters` skips a cluster, records the reason on the plan entry and appends
+each stand's state to the QA, when any of these hold:
+
+| Gate | Why |
+|---|---|
+| Duplicate Room Number in the cluster | the Number key is ambiguous, so the whole cluster is quarantined (its parameters stay as Main has them) |
+| Conflict and `Redraw Wins On Conflicts` is false | Main and the Redraw changed the same walls differently |
+| Room level mismatch (Main or Redraw vs baseline) | the stand is on a different level, so wall rebuilds would land in the wrong place |
+| Main or Redraw boundary is not made of walls | Room Separation Lines and non-wall boundaries are not supported |
+| Main wall to delete/replace is not RX, or a Redraw wall to create is not RX | only the two RX wall types may be rebuilt |
+| A created/replaced wall's type is missing in Main | the apply deletes before it creates, so a type that cannot resolve must fail here, not halfway |
+| A created/replaced wall's level is missing in Main | same reason; a wall's own level wins, the cluster level is only the fallback |
+| A Main wall to delete/replace hosts a `FamilyInstance` or `Opening` | Revit cascades doors/windows/openings with the wall and the merge cannot rebuild them, so the cluster is left alone |
+| The wall still separates two surviving stands, or a stand and an unmanaged Room | deleting it would put both Rooms in one region |
+
+A `Location.Move` that Revit refuses (returns false) raises, so that cluster rolls
+back instead of silently staying put.
+
+### Statuses, the summary and the audit trail
+`judge_run` sets `Summary['Status']`: `COMPLETED WITH ERRORS` if any change is
+`FAILED`/`VERIFY_FAILED`, otherwise `SUCCESS WITH WARNINGS` if any cluster was
+skipped or any issue is a conflict, otherwise `SUCCESS`. `Summary['Message']`
+carries the first skip/conflict reason (or a failure count), so the always-visible
+watch says why. `Summary['Audit']` is `OK`, `FAILED` or `SKIPPED` (no folder to
+write to). Skips stay visible in `gout` with their reason, so a dry run does not
+report a blocked cluster as mergeable.
+
+Every run writes two CSVs next to the Redraw (both gitignored). The log is
+appended and the summary is rewritten:
+
+| File | Written | Columns |
+|---|---|---|
+| `<title>.merge-log.csv` | append, one row per cluster plus one `change=PARAMETER` row per parameter decision | `run_utc, run_id, mode, cluster, stands, change, status, walls_replaced, walls_created, walls_deleted, params_written, tags_moved, details` |
+| `<title>.merge-summary.csv` | rewritten, one row for the run | `run_utc, run_id, mode, clusters_merged, clusters_skipped, clusters_moved, clusters_resized, clusters_added, clusters_removed, walls_replaced, walls_created, walls_deleted, params_written, tags_moved, conflicts` |
+
+`mode` is `APPLIED` or `PREVIEW`. A fatal run writes one `change=RUN FAILED` row
+with the exception text when it can locate the folder; if it cannot, `Audit` is
+`SKIPPED`. A failed write is reported in QA and sets `Audit` to `FAILED`.
 
 ### The preview
 A dry run draws the difference on the plan instead of only describing it:
@@ -177,10 +241,10 @@ preview colours, so an unmarked band from an older run cannot survive.
 
 The rebuild in `src/` changes the unit of comparison from a Room to a **Wall**.
 
-Today a stand is compared and rebuilt as a monolith: if the stand changed, its
-entire boundary is deleted and recreated. That is why only an **isolated**
-stand can merge — a shared wall cannot be half-rebuilt — and why a stand that
-merely grew loses the doors and joins on the walls that did not move.
+In the old room-level merge a stand was compared and rebuilt as a monolith: if the
+stand changed, its entire boundary was deleted and recreated. That is why only an
+**isolated** stand could merge — a shared wall cannot be half-rebuilt — and why a
+stand that merely grew lost the doors and joins on the walls that did not move.
 
 Comparing walls instead:
 
@@ -229,9 +293,21 @@ offline. Straight walls are matched by their ends, which is exact and O(1).
   sync only if the rule changes. Graph 2 fails on a mismatched `merge_parameters`.
 - **QA watch-only, no QA sidecar** — keeps the folder contract to exactly one RVT +
   one baseline JSON.
-- **Narrow geometry scope** — only REDRAW_ONLY changes on existing rooms bounded by
-  the two hardcoded RX wall types; everything else is skipped/reported, never
-  auto-fixed. Conservative by design.
+- **Narrow geometry scope, explicit gates** — only REDRAW_ONLY changes, RX walls only,
+  unshared walls only. Added stands are created, removed stands deleted, but a
+  cluster is skipped rather than half-applied when a type/level is missing, a wall
+  hosts a door/window/opening, a Number is duplicated, levels disagree or a
+  conflict is unresolved. Conservative by design.
+- **A cluster is the atomic unit of apply** — `apply_cluster` runs each cluster in
+  a `SubTransaction` of the single merge transaction. One cluster's failure cannot
+  leave a deleted Room or a half-built boundary behind, and the clusters that did
+  succeed still commit. The outer transaction is still one Ctrl+Z.
+- **The summary says what happened** — `SUCCESS` / `SUCCESS WITH WARNINGS` /
+  `COMPLETED WITH ERRORS` plus the first reason, and skips remain in the geometry
+  watch with their reason instead of disappearing.
+- **The audit trail is a file contract** — an append-only per-cluster/per-parameter
+  log and a rewritten per-run summary next to the Redraw. Both are gitignored so a
+  local run cannot publish stand data. A failed run still records `RUN FAILED`.
 
 ## 5. Revit API facts relied on (verified against docs)
 
@@ -293,6 +369,13 @@ offline. Straight walls are matched by their ends, which is exact and O(1).
   preview bands are marked for later cleanup (`Element.Name` reads it back).
 - `View.GetElementOverrides()` lists every element override in a view, so leftover
   preview colours can be found without relying on a marker.
+- `SubTransaction(Document)` + `Start()` / `Commit()` / `RollBack()`; `Commit()`
+  returns a `TransactionStatus` and is only complete when it returns
+  `TransactionStatus.Committed`. A sub-transaction must be finished before the
+  outer transaction commits.
+- `Wall.GetDependentElements(ElementFilter)` returns the elements Revit cascades
+  with the wall; `FamilyInstance` and `Opening` among them are doors, windows and
+  openings the merge must not destroy.
 - **`WorksharingUtils.GetCentralModelPath(Document)` does not exist in Revit
   2027.** Use `Document.GetWorksharingCentralModelPath()`, which returns the
   central path or null, and throws `InvalidOperationException` when the

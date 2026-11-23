@@ -1,5 +1,68 @@
 # Changelog
 
+## 2026-11-23 — Patch series P1-P9: an apply that cannot half-commit, and docs to match
+
+The merge had been made wall-level, but a cluster that failed part way through
+could still leave a deleted Room or a rebuilt boundary behind, the planner could
+delete a wall that hosted a door, and the audit trail described a plan that the
+run had not followed. Nine patches close those gaps. None of this has been run in
+Revit 2027 yet; `ROADMAP.md` section 1 is still the gate.
+
+- **P1 — one cluster is one atomic change.** A planned cluster is applied by
+  `apply_cluster` inside a `SubTransaction` of the merge transaction. A failure
+  rolls that cluster back and marks it `FAILED`; the other clusters still commit.
+  Every `Commit()` (preview, preview clear, cluster, merge) is compared with
+  `TransactionStatus.Committed`, and anything else aborts the run.
+- **P2 — Main-only walls stay, and a replacement is guarded like a delete.**
+  `Redraw Wins On Conflicts` no longer deletes a wall Main added after the Redraw
+  was cut, and a replaced wall now passes the shared-wall guard as well, because
+  the apply deletes it before the Redraw version is created.
+- **P3 — Rooms the merge cannot manage are protected.** Blank-Numbered Rooms stay
+  unmanaged, duplicate Numbers quarantine their cluster, and `collect_exclusions`
+  protects every wall those Rooms share, so the merge cannot delete a wall and
+  merge two Rooms into one region.
+- **P4 — created walls are matched against the whole cluster.** Every stand in the
+  cluster contributes its walls, so a wall shared with an unchanged neighbour is
+  matched instead of being created again on top of itself.
+- **P5 — skipped work stays visible and the status is honest.** `public_plan` keeps
+  `SKIPPED` clusters (with their reason) in a dry run. `judge_run` sets
+  `SUCCESS` / `SUCCESS WITH WARNINGS` / `COMPLETED WITH ERRORS`, `Message` carries
+  the first reason, `Summary['Audit']` is added, `MAIN_REMOVED` is reported as an
+  issue, and `BOTH_REMOVED` is a distinct status.
+- **P6 — the audit trail matches reality.** The log is append-only with the columns
+  `run_utc, run_id, mode, cluster, stands, change, status, walls_replaced,
+  walls_created, walls_deleted, params_written, tags_moved, details` — one row per
+  cluster plus one `change=PARAMETER` row per parameter decision. The summary is
+  rewritten per run with the cluster/wall/parameter totals. A failed run writes a
+  `RUN FAILED` row when it can. Both CSVs are gitignored so a local run cannot
+  publish stand data.
+- **P7 — inputs are checked and a refused move fails its cluster.** A blank
+  Directory, a non-numeric or negative tolerance and a non-positive spacing are
+  refused by name; a `Location.Move` that returns false raises instead of leaving
+  the Room behind.
+- **P7b — the default spacing is quiet.** The coarse-spacing warning only fires
+  above both `8 x tolerance` and the shipped 0.25 m, so a default run has no
+  warning.
+- **P8 — wall level is honoured and hosted elements are never lost.** A rebuilt
+  wall uses its own Redraw level (the cluster level is the fallback). A cluster is
+  skipped before any mutation when a created/replaced wall's type or level is
+  missing in Main, and when a Main wall it would delete or replace hosts a
+  `FamilyInstance` or `Opening` — Revit cascades those with the wall and the merge
+  cannot put them back. The issue names the hosted elements.
+- **P8b — attribute-only wall edits are merged.** `stand_status` compares the wall
+  attributes (type, height, offset, flip, level) as well as the geometry, so a wall
+  that changed without moving is `AFFECTED` and is rebuilt instead of reported
+  `ALREADY`.
+- **P9 — the docs catch up.** `AGENTS.md`, `DESIGN.md`, `ROADMAP.md` and this file
+  now describe the per-cluster transaction, the planner gates, the status strings,
+  the planner's input checks and the two CSV contracts. They also record the saved
+  defaults the graph actually ships: `Apply Updates` **false** (a dry run is the
+  default) and `Redraw Wins On Conflicts` **true**. The docs had said Apply was true
+  and did not mention the Redraw-wins default.
+
+P8b's commit (`6146ac3`) is unsigned: 1Password signing was unavailable when it was
+made.
+
 ## 2026-11-22 — `View` import, and a check for the bug class
 
 The QA after the first successful apply read `PREVIEW: could not sweep the views
