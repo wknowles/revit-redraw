@@ -69,6 +69,13 @@ Revit 2027 yet; `ROADMAP.md` section 1 is still the gate.
   resolves that conflict, Main's old walls are now deleted with the old geometry
   instead of being retained as "later Main work". P2's fix had left them behind,
   so only the Room moved.
+- **Follow-up — `Verify ...: 'dict' object is not callable` fixed.** The preview
+  block runs at module level and assigned `state=m.get(number)`, overwriting the
+  `state()` reader for the rest of the run. In apply mode verification runs after
+  the preview, so every affected stand failed to collect and every applied
+  cluster was reported `VERIFY_FAILED` even though the merge had succeeded. The
+  loop variable is now `mstate`, and `tools/check_repo.py` gained a static check
+  that fails on any module-level assignment which shadows a function name.
 
 P8b's commit (`6146ac3`) is unsigned: 1Password signing was unavailable when it was
 made.

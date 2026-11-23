@@ -63,6 +63,48 @@ def check_graphs():
     return failures
 
 
+def check_shadowing():
+    """A module-level assignment that reuses a function name breaks later calls.
+
+    The main body of `src/graph2.py` is module level, so a loop variable there
+    (e.g. `state`) overwrites the function of the same name for everything that
+    runs afterwards. That is how `Verify A01: 'dict' object is not callable`
+    happened: the preview loop rebound `state` to a dict, and verification then
+    tried to call it. Function bodies are separate scopes and are skipped.
+    """
+    import ast
+
+    failures = []
+    for name in ('src/graph2.py', 'src/merge_core.py'):
+        path = os.path.join(ROOT, name)
+        with open(path, encoding='utf-8') as handle:
+            tree = ast.parse(handle.read(), path)
+        defined = {node.name for node in tree.body
+                   if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+
+        class Finder(ast.NodeVisitor):
+            def __init__(self):
+                self.hits = []
+
+            def visit_FunctionDef(self, node):
+                pass
+
+            def visit_ClassDef(self, node):
+                pass
+
+            def visit_Name(self, node):
+                if isinstance(node.ctx, ast.Store) and node.id in defined:
+                    self.hits.append((node.lineno, node.id))
+
+        finder = Finder()
+        for node in tree.body:
+            finder.visit(node)
+        for line, identifier in sorted(set(finder.hits)):
+            failures.append('%s:%d assigns to %r, which is a function in this file'
+                            % (name, line, identifier))
+    return failures
+
+
 def run(label, argv):
     result = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
     ok = result.returncode == 0
@@ -79,6 +121,13 @@ def main():
 
     problems = check_graphs()
     print('%-46s %s' % ('graphs are valid CRLF JSON with compiling Python',
+                        'PASS' if not problems else 'FAIL'))
+    for problem in problems:
+        print('    ' + problem)
+    failures.extend(problems)
+
+    problems = check_shadowing()
+    print('%-46s %s' % ('no module-level name shadows a function',
                         'PASS' if not problems else 'FAIL'))
     for problem in problems:
         print('    ' + problem)

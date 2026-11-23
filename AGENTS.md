@@ -47,5 +47,5 @@
 - `python3 phase0/test_probe.py` runs the probe against stubbed Revit models (walls, non-walls, unplaced, no rooms) and fails if the probe crashes.
 - `python3 src/test_merge_core.py` unit tests the wall matching and clustering engine.
 - `python3 src/test_graph2_plan.py` tests graph 2's planner and apply path against stubbed Revit models: safety gates, audit rows, statuses, input validation.
-- `python3 tools/check_repo.py` runs every static check at once. `python3 tools/check_api.py` on its own audits the Revit API usage against `tools/revit_api_2027.json`, and `tools/check_calls.py` checks every call's arguments.
+- `python3 tools/check_repo.py` runs every static check at once, including a check that no module-level assignment shadows a function name (graph 2's main body is module level, so a loop variable called `state` used to overwrite the `state()` reader). `python3 tools/check_api.py` on its own audits the Revit API usage against `tools/revit_api_2027.json`, and `tools/check_calls.py` checks every call's arguments.
 - Real verification requires opening each graph in Dynamo inside Revit with a suitable project.

@@ -1781,9 +1781,9 @@ try:
             # Show what was skipped, and why, rather than leaving the plan
             # looking empty.
             for number in op.get('affected',[]) or op.get('stands',[]):
-                state=m.get(number)
-                if state is None:continue
-                for wd in state_walls(state).values():
+                mstate=m.get(number)
+                if mstate is None:continue
+                for wd in state_walls(mstate).values():
                     bands.append((wd['curve'],PREVIEW_SKIPPED))
             continue
         plan=op['_plan']
