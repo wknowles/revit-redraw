@@ -69,6 +69,12 @@ Revit 2027 yet; `ROADMAP.md` section 1 is still the gate.
   resolves that conflict, Main's old walls are now deleted with the old geometry
   instead of being retained as "later Main work". P2's fix had left them behind,
   so only the Room moved.
+- **Follow-up — a moved stand vacates its old shared wall.** The shared-wall
+  guard treated any stand that still existed as still occupying its side, so a
+  cluster where one stand left for an island and another expanded into the gap
+  was skipped for "one region" even though the Redraw had resolved it. The guard
+  now ignores a stand whose Room point moved away, and the regressions that model
+  a resize pin the Room point the way Revit keeps it.
 - **Follow-up — `Verify ...: 'dict' object is not callable` fixed.** The preview
   block runs at module level and assigned `state=m.get(number)`, overwriting the
   `state()` reader for the rest of the run. In apply mode verification runs after

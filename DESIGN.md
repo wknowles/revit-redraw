@@ -197,7 +197,7 @@ each stand's state to the QA, when any of these hold:
 | A created/replaced wall's type is missing in Main | the apply deletes before it creates, so a type that cannot resolve must fail here, not halfway |
 | A created/replaced wall's level is missing in Main | same reason; a wall's own level wins, the cluster level is only the fallback |
 | A Main wall to delete/replace hosts a `FamilyInstance` or `Opening` | Revit cascades doors/windows/openings with the wall and the merge cannot rebuild them, so the cluster is left alone |
-| The wall still separates two surviving stands, or a stand and an unmanaged Room | deleting it would put both Rooms in one region |
+| The wall still separates two surviving stands, or a stand and an unmanaged Room | deleting it would put both Rooms in one region. A stand whose Room moved away in the Redraw has vacated its side, so a wall it shared is allowed to go |
 
 A `Location.Move` that Revit refuses (returns false) raises, so that cluster rolls
 back instead of silently staying put.

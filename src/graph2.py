@@ -1468,13 +1468,27 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
         # Business rules: the boundary must be made of walls, and only the RX
         # wall types may be rebuilt.
         guard=None
-        removed_stands=[n for n in comp if statuses.get(n)=='REMOVED']
+        def still_occupies(number):
+            """False when the stand no longer sits on its side of the wall.
+
+            A stand the Redraw deleted is gone; a stand whose Room moved away
+            (E36-60 leaving the cluster, say) has vacated that side too, so a
+            wall it shared is no longer separating two occupied regions.
+            """
+            if statuses.get(number)=='REMOVED':
+                return False
+            before=m.get(number);after=r.get(number)
+            if before is not None and after is not None:
+                a=before.get('room_point');b=after.get('room_point')
+                if a is not None and b is not None and dst(a,b)>tol:
+                    return False
+            return True
         # A replacement deletes the Main wall before the Redraw's version is
         # created, so it needs the same guard as a plain delete.
         touched_main=list(plan['delete'])+[wall for wall,_ in plan['replace']]
         for wall in touched_main:
             owners=wall_stands.get(wall['ref']['element_id'],set())
-            staying=sorted([n for n in owners if n not in removed_stands])
+            staying=sorted([n for n in owners if n=='#unmanaged' or still_occupies(n)])
             if len(staying)>1 or '#unmanaged' in staying:
                 # The wall separates two stands that both keep a room, or a
                 # stand and a Room the merge does not manage, so removing it

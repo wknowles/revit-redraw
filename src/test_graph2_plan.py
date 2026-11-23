@@ -501,11 +501,37 @@ def test_wall_between_two_surviving_stands_blocks_the_cluster():
     # the Redraw removed the wall but kept both rooms
     redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
               'A02': stand('A02', [(12, Curve(20, 0, 20, 10))], 2)}
+    # A real Room keeps its location point when its walls change; the fixture
+    # derives it from the bounding box, so pin it here to model a resize rather
+    # than a move.
+    for state in (base, main, redraw):
+        state['A01']['room_point'] = Point(5.0, 5.0)
+        state['A02']['room_point'] = Point(15.0, 5.0)
     gplan, pplan, issues = plan(base, main, redraw)
     check(gplan[0]['status'] == 'SKIPPED',
           'removing a wall between two surviving stands must be skipped')
     check('one region' in gplan[0]['reason'],
           'the reason should say why, got %r' % gplan[0]['reason'])
+
+
+def test_a_moved_stand_vacates_the_wall_it_shared():
+    """A stand that leaves the cluster for an island no longer occupies its old
+    side, so the wall it shared may be deleted and the neighbour can expand."""
+    shared = Curve(10, 0, 10, 10)
+    base = {'A': stand('A', [(10, shared), (11, Curve(0, 0, 10, 0))], 1),
+            'B': stand('B', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    main = dict(base)
+    # B moves to its own island; A closes the gap with a new wall; the wall
+    # they shared (10) is gone from the Redraw.
+    redraw = {'A': stand('A', [(11, Curve(0, 0, 10, 0)), (13, Curve(20, 0, 20, 10))], 1),
+              'B': stand('B', [(12, Curve(50, 0, 50, 10))], 2)}
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
+    check(gplan[0]['status'] == 'PLANNED',
+          'a moved stand should not block the wall it left behind, got %r'
+          % gplan[0].get('reason'))
+    deleted = [wall['ref']['element_id'] for wall in gplan[0]['_plan']['delete']]
+    check(10 in deleted, 'the vacated shared wall should be deleted, got %s' % deleted)
 
 
 def test_redraw_wins_keeps_a_wall_added_to_main_after_the_redraw():
@@ -540,6 +566,11 @@ def test_replaced_wall_between_two_surviving_stands_blocks_the_cluster():
             'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
     redraw = {'A01': stand('A01', [(10, shared), (11, Curve(0, -2, 10, -2))], 1),
               'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    # The Room points do not move when a wall does; pin them so this tests a
+    # replacement, not a move.
+    for state in (base, main, redraw):
+        state['A01']['room_point'] = Point(5.0, 5.0)
+        state['A02']['room_point'] = Point(15.0, 5.0)
     # the shared wall stays where it is but the Redraw changes its type
     for state in (main, redraw):
         state['A01']['wall_loops'][0][0]['type'] = (
@@ -657,6 +688,9 @@ def test_skipped_cluster_reports_where_every_stand_is():
     main = dict(base)
     redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
               'A02': stand('A02', [(12, Curve(20, 0, 20, 10))], 2)}
+    for state in (base, redraw):
+        state['A01']['room_point'] = Point(5.0, 5.0)
+        state['A02']['room_point'] = Point(15.0, 5.0)
     qa = []
     gplan, pplan = graph2.plan_clusters(base, main, redraw, [], 0.03, 0.25, False, qa, [])
     check(gplan[0]['status'] == 'SKIPPED', 'the cluster should be skipped')
@@ -1045,6 +1079,11 @@ def test_dry_run_keeps_a_skipped_cluster_visible():
     main = dict(base)
     redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
               'A02': stand('A02', [(12, Curve(20, 0, 20, 10))], 2)}
+    # A Room keeps its location point when its walls change; the fixture
+    # derives it from the bounding box, so pin it to model a resize.
+    for state in (base, redraw):
+        state['A01']['room_point'] = Point(5.0, 5.0)
+        state['A02']['room_point'] = Point(15.0, 5.0)
     gplan, pplan, issues = plan(base, main, redraw)
     check(gplan[0]['status'] == 'SKIPPED', 'the cluster should be skipped')
     reason = gplan[0]['reason']
@@ -1065,6 +1104,9 @@ def test_only_skipped_clusters_report_warnings():
     main = dict(base)
     redraw = {'A01': stand('A01', [(11, Curve(0, 0, 10, 0))], 1),
               'A02': stand('A02', [(12, Curve(20, 0, 20, 10))], 2)}
+    for state in (base, redraw):
+        state['A01']['room_point'] = Point(5.0, 5.0)
+        state['A02']['room_point'] = Point(15.0, 5.0)
     gplan, pplan, issues = plan(base, main, redraw)
     gout = graph2.public_plan(gplan)
     status, message, failed, skipped, conflicts = graph2.judge_run([], gout, issues)
