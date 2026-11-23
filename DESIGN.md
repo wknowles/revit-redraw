@@ -13,12 +13,14 @@ Deferred work and known gaps: `ROADMAP.md`.
    three-way compare (baseline vs Main vs Redraw), merge Redraw-only parameter and
    geometry changes back into Main, verify, then close the Redraw document it opened
    for reading. Nothing is linked into Main, so one Ctrl+Z undoes the merge, and
-   each cluster is applied in a sub-transaction, so a cluster that fails is rolled
-   back while the rest of the run stays applied.
+   each geometry cluster is applied in a sub-transaction, so a cluster that fails
+   is rolled back while the rest of the run stays applied.
 
 Room Number is the stand key and is assumed **globally unique** (business decision).
-Duplicates are errors in graph 1; graph 2 quarantines a duplicate stand's cluster and
-treats duplicate and blank-Number Rooms as unmanaged.
+Duplicates are errors in graph 1. Graph 2 quarantines the geometry of a duplicate
+stand's cluster and treats duplicate and blank-Number Rooms as unmanaged. The
+duplicated stand's parameters stay as Main has them; parameter writes for other
+stands in the cluster are independent of the geometry skip.
 
 After graph 1 the Redraw is saved and closed and Main is active. The intended user
 flow is: close Main → open the Redraw → edit/save/close → reopen Main → run graph 2.
@@ -137,9 +139,10 @@ names the input. A coarse spacing only warns, and only when it exceeds both
    descriptors (type/level/height/offset/flipped/curve), centroid, room point and
    level id and name. The Room Tag types and views already in the model are read
    now (`room_tag_templates`), before anything is merged.
-   A blank-Numbered Room is skipped and a duplicate Number is quarantined by
-   `collect`; `collect_exclusions` then reads those unmanaged Rooms' boundaries so
-   every wall they share is protected from deletion.
+   A blank-Numbered Room is skipped and a duplicate Number is quarantined.
+   `collect` keeps the first Room for a duplicated Number; `plan_clusters` skips
+   any cluster that contains it, and `collect_exclusions` reads the unmanaged
+   Rooms' boundaries so every wall they share is protected from deletion.
 5. **Classify** every stand (`stand_status`): `UNCHANGED`, `ALREADY`, `CONFLICT`,
    `AFFECTED`, `ADDED`, `REMOVED`, `MAIN_ONLY`, `MAIN_REMOVED`, `BOTH_REMOVED`.
    `ALREADY` means Main already is what the Redraw wants - that is not a conflict.
@@ -167,10 +170,14 @@ names the input. A coarse spacing only warns, and only when it exceeds both
    clears the previous preview) or **Apply** (two transactions: `Redraw Merge -
    Clear Preview`, then `MVP2.4B6 - Merge Redraw Updates`): delete the walls to
    go, create the walls to come, then create, delete and move the rooms, tag the
-   added stands, and write the parameters. Each cluster is applied by
+   added stands, and write the parameters. Each geometry cluster is applied by
    `apply_cluster` in a `SubTransaction` of the merge transaction: every edit of
    that cluster commits together, or a failure rolls the whole cluster back and
-   marks it `FAILED`, while the other clusters still commit. Every `Commit()` is
+   marks it `FAILED`, while the other clusters still commit. Parameter writes run
+   after the geometry clusters in the same merge transaction and are independent of
+   the cluster plan. A `REDRAW_ONLY` parameter is written even when its cluster is
+   skipped or its geometry fails. The exception is a duplicated Room Number, whose
+   parameters are not updated. Every `Commit()` is
    checked against `TransactionStatus.Committed` (preview, preview clear, each
    cluster, the merge), and a commit that does not return `Committed` aborts the
    run. After the merge commit, re-collect Main and verify each cluster against
@@ -189,7 +196,7 @@ each stand's state to the QA, when any of these hold:
 
 | Gate | Why |
 |---|---|
-| Duplicate Room Number in the cluster | the Number key is ambiguous, so the whole cluster is quarantined (its parameters stay as Main has them) |
+| Duplicate Room Number in the cluster | the Number key is ambiguous, so the whole cluster geometry is quarantined; the duplicated stand's parameters are not updated, but other stands in the cluster can still receive parameter updates |
 | Conflict and `Redraw Wins On Conflicts` is false | Main and the Redraw changed the same walls differently |
 | Room level mismatch (Main or Redraw vs baseline) | the stand is on a different level, so wall rebuilds would land in the wrong place |
 | Main or Redraw boundary is not made of walls | Room Separation Lines and non-wall boundaries are not supported |
@@ -204,7 +211,7 @@ back instead of silently staying put.
 
 ### Statuses, the summary and the audit trail
 `judge_run` sets `Summary['Status']`: `COMPLETED WITH ERRORS` if any change is
-`FAILED`/`VERIFY_FAILED`, otherwise `SUCCESS WITH WARNINGS` if any cluster was
+`FAILED`/`VERIFY_FAILED`, otherwise `SUCCESS WITH WARNINGS` if any change was
 skipped or any issue is a conflict, otherwise `SUCCESS`. `Summary['Message']`
 carries the first skip/conflict reason (or a failure count), so the always-visible
 watch says why. `Summary['Audit']` is `OK`, `FAILED` or `SKIPPED` (no folder to
@@ -307,10 +314,12 @@ offline. Straight walls are matched by their ends, which is exact and O(1).
   cluster is skipped rather than half-applied when a type/level is missing, a wall
   hosts a door/window/opening, a Number is duplicated, levels disagree or a
   conflict is unresolved. Conservative by design.
-- **A cluster is the atomic unit of apply** — `apply_cluster` runs each cluster in
-  a `SubTransaction` of the single merge transaction. One cluster's failure cannot
-  leave a deleted Room or a half-built boundary behind, and the clusters that did
-  succeed still commit. The outer transaction is still one Ctrl+Z.
+- **A geometry cluster is the atomic unit of apply** — `apply_cluster` runs each
+  cluster in a `SubTransaction` of the single merge transaction. One cluster's
+  failure cannot leave a deleted Room or a half-built boundary behind, and the
+  clusters that did succeed still commit. Parameter writes are separate from the
+  cluster transaction and can still succeed when the geometry is skipped or fails,
+  except for a duplicated Room Number. The outer transaction is still one Ctrl+Z.
 - **The summary says what happened** — `SUCCESS` / `SUCCESS WITH WARNINGS` /
   `COMPLETED WITH ERRORS` plus the first reason, and skips remain in the geometry
   watch with their reason instead of disappearing.

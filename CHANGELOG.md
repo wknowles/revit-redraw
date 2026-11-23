@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-23 — In-Revit validation recorded; parameter docs aligned; process diagram
+
+- **The rebuilt graph is validated in Revit 2027.** `ROADMAP.md` section 1 is now
+  the regression checklist to run again after a Revit or Dynamo upgrade.
+- **`DESIGN.md` and `AGENTS.md` now match the code for duplicate Room Numbers.** A
+  duplicate Number quarantines the geometry cluster and stops that stand's
+  parameter update. Parameter writes for other stands in the cluster are
+  independent of the geometry plan. The old wording said the whole cluster's
+  parameters stayed as Main had them.
+- **The user guide has a Mermaid process diagram** and matches the current inputs,
+  outputs, statuses, and error messages.
+
 ## 2026-11-23 — Phase 0 probe removed
 
 - **`phase0/` is deleted.** The probe answered its four runtime questions, and

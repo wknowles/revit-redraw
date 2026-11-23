@@ -1,13 +1,14 @@
 # Roadmap — known gaps, deferred features, test checklist
 
 Companion to `DESIGN.md` (current behaviour) and `CHANGELOG.md` (what changed).
-Everything here is intentionally out of scope today; treat it as the input list for
-future feature work.
+Section 1 is the regression checklist. Sections 2 and 3 are intentionally out of
+scope today; treat them as the input list for future feature work.
 
-## 1. Must verify in Revit 2027 before trusting the current build
+## 1. In-Revit 2027 validation and regression checklist
 
-No Revit/Dynamo runtime was available during the build; only static checks and
-mocked pure-function tests passed. Run this checklist first:
+The rebuilt graph has been validated in Revit 2027. Keep this list as the
+regression checklist. Run it again after a Revit or Dynamo upgrade, or after a
+change to either graph. Tick the boxes during each pass.
 
 ### Graph 1
 - [ ] Local non-workshared Main: `CopyModel` creates the Redraw without activating it;
@@ -48,9 +49,11 @@ mocked pure-function tests passed. Run this checklist first:
 - [ ] Hosted elements: put a door or window in a Main wall that the cluster would
       replace/delete → the cluster is skipped, the issue names the hosted element,
       and the door survives.
-- [ ] Duplicate/blank Numbers: two Rooms with the same Number → that cluster is
-      quarantined and its parameters stay as Main has them; a blank-Numbered Room
-      sharing a wall with a stand → the shared wall is not deleted.
+- [ ] Duplicate/blank Numbers: two Rooms with the same Number → the geometry
+      cluster is quarantined; the duplicated stand's parameters stay as Main has
+      them, while other stands in the cluster can still get parameter updates. A
+      blank-Numbered Room sharing a wall with a stand → the shared wall is not
+      deleted.
 - [ ] Cluster failure: force one cluster to fail (e.g. a wall type that exists only
       at apply time) → only that cluster is rolled back and reported `FAILED`; the
       other clusters are `VERIFIED` and the run says `COMPLETED WITH ERRORS`.
@@ -92,9 +95,11 @@ mocked pure-function tests passed. Run this checklist first:
   would cascade the hosted elements and the merge cannot recreate them, so the
   cluster is skipped and the hosted elements are named in the issue.
 - **Unmanaged Rooms are protected, not merged** — a blank-Numbered Room is skipped,
-  a duplicate Room Number quarantines its cluster, and any wall those Rooms share
-  is protected from deletion. A cluster that would remove a wall separating a stand
-  from an unmanaged Room is skipped.
+  a duplicate Room Number quarantines its cluster geometry, and any wall those
+  Rooms share is protected from deletion. The duplicated stand's parameters stay
+  as Main has them; other stands in the cluster can still get parameter updates.
+  A cluster that would remove a wall separating a stand from an unmanaged Room is
+  skipped.
 - **Level changes of a Room are still skipped**; a wall moved to another level is
   rebuilt on that level only when the level exists in Main.
 - **Tags**: a new stand is tagged in every view that already carries Room Tags; a
@@ -112,10 +117,11 @@ mocked pure-function tests passed. Run this checklist first:
   Summary says `Redraw document closed: NO` and QA names it.
 - **Directory inputs ship blank** — operators must select the folder on every run.
   This is intentional: local paths are not published.
-- **Offline tests only** — `src/test_*.py` and
-  `tools/check_repo.py` cover the planner, merge core and the static
-  contracts, but nothing has been run inside Revit 2027 yet: section 1 is still the
-  real gate. `.dyn` edits remain hand/programmatic JSON surgery (see `AGENTS.md`).
+- **Validated in Revit 2027** — the rebuilt graph passed the in-Revit checklist.
+  The offline tests in `src/test_*.py` and `tools/check_repo.py` still cover the
+  planner, merge core and static contracts. Use section 1 as the regression gate
+  after any Revit or Dynamo upgrade. `.dyn` edits remain hand/programmatic JSON
+  surgery (see `AGENTS.md`).
 - Graph 2's apply transaction is still named `MVP2.4B6 - Merge Redraw Updates`
   (kept for continuity); transaction names retain MVP prefixes even though the
   graph `Name` fields are now `Create Redraw` / `Compare and Update Redraw`.
@@ -124,8 +130,8 @@ mocked pure-function tests passed. Run this checklist first:
 
 Ordered roughly by value/effort; none are committed.
 
-1. **In-Revit regression pass** (section 1) and then a small sample Main/Redraw pair
-   checked into the repo as a manual test fixture.
+1. **Sample fixture** — add a small sample Main/Redraw pair checked into the repo
+   as a manual test fixture. The in-Revit regression pass (section 1) is complete.
 2. **Harden cloud temp-central cleanup**: graph 1 now attempts to reactivate Main,
    close/delete the temp central and close the Redraw; verify this in Revit. If
    closing the host document is refused, investigate a supported cloud→local detach
