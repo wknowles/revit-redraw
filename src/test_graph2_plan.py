@@ -896,6 +896,117 @@ def test_only_skipped_clusters_report_warnings():
     check(message, 'the summary should say why the run is not clean')
 
 
+def test_a_cluster_names_what_it_does():
+    """The audit counts real changes: a new stand is ADDED, a deleted one is
+    REMOVED, a moved one is MOVED - never the old 'CLUSTER' placeholder."""
+    a = Curve(0, 0, 10, 0)
+    c_wall = Curve(40, 0, 50, 0)
+    base = {'A': stand('A', [(11, a)], 1), 'C': stand('C', [(31, c_wall)], 3)}
+    main = dict(base)
+    added = dict(base, B=stand('B', [(21, Curve(20, 0, 30, 0))], 2))
+    gplan, pplan, issues = plan(base, main, added)
+    check(gplan and gplan[0]['change'] == 'ADDED',
+          'a new stand should be ADDED, got %s' % [op.get('change') for op in gplan])
+    gone = {'C': stand('C', [(31, c_wall)], 3)}
+    gplan, pplan, issues = plan(base, main, gone)
+    check(gplan and gplan[0]['change'] == 'REMOVED',
+          'a deleted stand should be REMOVED, got %s' % [op.get('change') for op in gplan])
+    moved_redraw = {'A': stand('A', [(11, Curve(0, 5, 10, 5))], 1),
+                    'C': stand('C', [(31, c_wall)], 3)}
+    gplan, pplan, issues = plan(base, main, moved_redraw)
+    check(gplan and gplan[0]['change'] == 'MOVED',
+          'a moved stand should be MOVED, got %s' % [op.get('change') for op in gplan])
+    check(all(op.get('change') != 'CLUSTER' for op in gplan),
+          'no cluster should carry the old placeholder, got %s'
+          % [op.get('change') for op in gplan])
+
+
+def test_cluster_change_mixes_stand_statuses():
+    """A cluster that both adds and removes a stand is MIXED, and a conflict
+    merged under the Redraw wins is a move."""
+    statuses = {'A': 'ADDED', 'B': 'ADDED', 'C': 'REMOVED', 'D': 'AFFECTED',
+                'E': 'CONFLICT'}
+    check(graph2.cluster_change(statuses, ['A', 'B']) == 'ADDED',
+          'two new stands should be ADDED')
+    check(graph2.cluster_change(statuses, ['C']) == 'REMOVED',
+          'a deleted stand should be REMOVED')
+    check(graph2.cluster_change(statuses, ['A', 'C']) == 'MIXED',
+          'an add and a remove should be MIXED')
+    check(graph2.cluster_change(statuses, ['D', 'E']) == 'MOVED',
+          'a moved stand and a conflict won by the Redraw should be MOVED')
+
+
+def test_audit_rows_match_their_headers():
+    """Both CSVs must be rectangular: a row shorter or longer than its header
+    is a corrupt audit trail. The parameter log is part of the same file."""
+    import csv
+    import shutil
+    import tempfile
+
+    gout = [{'cluster': 'C1', 'stands': ['A01', 'A02'], 'change': 'MOVED',
+             'status': 'VERIFIED', 'walls_replaced': 1, 'walls_created': 2,
+             'walls_deleted': 3, 'params_written': 0, 'tags_moved': 4,
+             'walls_kept': 5}]
+    pout = [{'stand': 'A01', 'parameter': 'Product Code', 'main_before': 'X',
+             'main_after': 'Y', 'redraw': 'Y', 'status': 'VERIFIED'}]
+    rows = graph2.audit_rows(pout, gout)
+    totals = graph2.audit_totals(pout, gout, [{'type': 'PARAMETER CONFLICT'}])
+    check(len(rows) == 2,
+          'one row per cluster and one per parameter, got %d' % len(rows))
+    check(all(len(row) == len(graph2.AUDIT_LOG_COLUMNS) for row in rows),
+          'every log row must fill the log header, got %s'
+          % [len(row) for row in rows])
+    check(len(totals) == len(graph2.AUDIT_SUMMARY_COLUMNS),
+          'the totals must fill the summary header, got %d for %d columns'
+          % (len(totals), len(graph2.AUDIT_SUMMARY_COLUMNS)))
+    check(totals[0] == 1 and totals[1] == 0,
+          'the merged and skipped counts are wrong, got %s' % totals)
+    check(totals[2] == 1,
+          'the moved count should come from the cluster change, got %s' % totals)
+    check(totals[9] == 1,
+          'params_written should count the parameter plan, got %s' % totals)
+    check(totals[11] == 1, 'the conflict count is wrong, got %s' % totals)
+
+    folder = tempfile.mkdtemp()
+    try:
+        ok, error = graph2.write_audit(folder, 'marker', rows, totals, 'APPLIED', 'run-1')
+        check(ok and error is None, 'the audit write should succeed, got %r' % (error,))
+        with open(os.path.join(folder, 'marker.merge-log.csv'),
+                  newline='', encoding='utf-8') as handle:
+            log = list(csv.reader(handle))
+        with open(os.path.join(folder, 'marker.merge-summary.csv'),
+                  newline='', encoding='utf-8') as handle:
+            summary = list(csv.reader(handle))
+    finally:
+        shutil.rmtree(folder)
+    check(all(len(row) == len(log[0]) for row in log),
+          'every log row must match its header, got %s' % [len(row) for row in log])
+    check(all(len(row) == len(summary[0]) for row in summary),
+          'every summary row must match its header, got %s'
+          % [len(row) for row in summary])
+    check(log[0] == graph2.AUDIT_PREFIX + graph2.AUDIT_LOG_COLUMNS,
+          'the log header should be the declared one, got %s' % log[0])
+    check(summary[0] == graph2.AUDIT_PREFIX + graph2.AUDIT_SUMMARY_COLUMNS,
+          'the summary header should be the declared one, got %s' % summary[0])
+    cluster_row = log[1]
+    check(cluster_row[3] == 'C1' and cluster_row[4] == 'A01, A02',
+          'the cluster row should keep its cluster and stands, got %s' % cluster_row)
+    param_row = log[2]
+    check(param_row[3] == '' and param_row[4] == 'A01' and param_row[5] == 'PARAMETER',
+          'a parameter row should have no cluster and name its stand, got %s' % param_row)
+    check(param_row[12] == 'Product Code: X -> Y',
+          'the parameter detail should show the change, got %r' % param_row[12])
+
+
+def test_write_audit_reports_a_failure():
+    """A failed audit must not look like a successful run."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix='.txt') as handle:
+        ok, error = graph2.write_audit(handle.name, 'marker', [], [], 'APPLIED', 'run-1')
+    check(ok is False and error, 'a failed audit must say why, got %r' % (ok,))
+
+
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]

@@ -1090,34 +1090,85 @@ def draw_preview(host, view, bands, recolour, z, qa):
     return drawn, recoloured
 
 
+AUDIT_PREFIX = ['run_utc', 'run_id', 'mode']
+AUDIT_LOG_COLUMNS = ['cluster', 'stands', 'change', 'status', 'walls_replaced',
+                     'walls_created', 'walls_deleted', 'params_written', 'tags_moved',
+                     'details']
+AUDIT_SUMMARY_COLUMNS = ['clusters_merged', 'clusters_skipped', 'clusters_moved',
+                         'clusters_resized', 'clusters_added', 'clusters_removed',
+                         'walls_replaced', 'walls_created', 'walls_deleted',
+                         'params_written', 'tags_moved', 'conflicts']
+
+
+def audit_rows(pout, gout):
+    """The log rows for this run: one per cluster, then one per parameter.
+
+    `write_audit` prepends the stamp, run id and mode, so a row here has
+    exactly the fields of AUDIT_LOG_COLUMNS.
+    """
+    rows=[]
+    for op in gout:
+        details='%d wall(s) kept'%op.get('walls_kept',0)
+        if op.get('reason'):details+='; '+op['reason']
+        rows.append([op.get('cluster',''),', '.join(op.get('stands',[])),
+                     op.get('change','NONE'),op.get('status',''),
+                     op.get('walls_replaced',0),op.get('walls_created',0),
+                     op.get('walls_deleted',0),op.get('params_written',0),
+                     op.get('tags_moved',0),details])
+    for op in pout:
+        written=op.get('status') in ('PLANNED','APPLIED','VERIFIED')
+        # The value the run sets, or what Main actually holds after a failure.
+        if op.get('status') in ('VERIFIED','VERIFY_FAILED','FAILED'):
+            after=op.get('main_after')
+        else:
+            after=op.get('redraw')
+        rows.append(['',op.get('stand',''),'PARAMETER',op.get('status',''),
+                     0,0,0,1 if written else 0,0,
+                     '%s: %s -> %s'%(op.get('parameter'),op.get('main_before'),after)])
+    return rows
+
+
+def audit_totals(pout, gout, issues):
+    """The summary totals, in the order of AUDIT_SUMMARY_COLUMNS."""
+    changes=[op.get('change','NONE') for op in gout]
+    return [sum(1 for x in gout if x.get('status') in ('PLANNED','APPLIED','VERIFIED')),
+            sum(1 for x in gout if x.get('status')=='SKIPPED'),
+            changes.count('MOVED'),changes.count('RESIZED'),
+            changes.count('ADDED'),changes.count('REMOVED'),
+            sum(x.get('walls_replaced',0) for x in gout),
+            sum(x.get('walls_created',0) for x in gout),
+            sum(x.get('walls_deleted',0) for x in gout),
+            sum(1 for x in pout if x.get('status') in ('PLANNED','APPLIED','VERIFIED')),
+            sum(x.get('tags_moved',0) for x in gout),
+            sum(1 for x in issues if 'CONFLICT' in x.get('type',''))]
+
+
 def write_audit(folder, base_name, rows, totals, mode, run_id):
-    """Append this run to the CSV audit trail next to the Redraw."""
+    """Append this run to the CSV audit trail next to the Redraw.
+
+    Returns (True, None) on success, or (False, message). A failed audit must
+    not look like a successful one, so the caller reports the message.
+    """
     import csv
     import datetime
     stamp = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
     log_path = os.path.join(folder, base_name + '.merge-log.csv')
     summary_path = os.path.join(folder, base_name + '.merge-summary.csv')
-    header = ['run_utc', 'run_id', 'mode', 'cluster', 'stand_number', 'stand_name',
-              'change', 'status', 'walls_replaced', 'walls_created', 'walls_deleted',
-              'params_written', 'tags_moved', 'details']
     new_file = not os.path.isfile(log_path)
     try:
         with open(log_path, 'a', newline='', encoding='utf-8') as handle:
             writer = csv.writer(handle)
             if new_file:
-                writer.writerow(header)
+                writer.writerow(AUDIT_PREFIX + AUDIT_LOG_COLUMNS)
             for row in rows:
                 writer.writerow([stamp, run_id, mode] + row)
         with open(summary_path, 'w', newline='', encoding='utf-8') as handle:
             writer = csv.writer(handle)
-            writer.writerow(['run_utc', 'run_id', 'mode', 'clusters_merged', 'clusters_skipped',
-                             'stands_moved', 'stands_resized', 'stands_added', 'stands_removed',
-                             'walls_replaced', 'walls_created', 'walls_deleted',
-                             'params_written', 'tags_moved', 'conflicts'])
+            writer.writerow(AUDIT_PREFIX + AUDIT_SUMMARY_COLUMNS)
             writer.writerow([stamp, run_id, mode] + totals)
-        return True
-    except Exception:
-        return False
+        return True,None
+    except Exception as ex:
+        return False,str(ex)
 
 def where(state):
     """A short description of where a stand is, for the QA log."""
@@ -1127,6 +1178,21 @@ def where(state):
         'placed' if state.get('has_geometry') else 'NO BOUNDARY',
         state.get('area') or 0.0,
         sum(len(loop) for loop in state.get('wall_loops', [])))
+
+
+def cluster_change(statuses, numbers):
+    """What a cluster does, from the statuses of the stands it touches.
+
+    A conflicted stand is merged like any other changed stand when the Redraw
+    wins, so it counts as a move. A cluster with no added or removed stand is
+    a move; a wall-only change has no stand and is a move too.
+    """
+    kinds=set('AFFECTED' if statuses.get(n)=='CONFLICT' else statuses.get(n)
+              for n in numbers)
+    if kinds=={'ADDED'}:return 'ADDED'
+    if kinds=={'REMOVED'}:return 'REMOVED'
+    if len(kinds)>1:return 'MIXED'
+    return 'MOVED'
 
 
 def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=None, duplicates=None):
@@ -1178,7 +1244,8 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
         conflicted=[n for n in comp if statuses.get(n)=='CONFLICT']
         if not affected and not conflicted:continue
         comp_no+=1;cid='C%d'%comp_no
-        op={'cluster':cid,'stands':comp,'affected':affected,'status':'PLANNED','change':'MOVED'}
+        op={'cluster':cid,'stands':comp,'affected':affected,'status':'PLANNED',
+            'change':cluster_change(statuses,affected+conflicted)}
         dupes=sorted(set(comp)&duplicates)
         if dupes:
             reason=('Duplicate Room Number(s) in Main or the Redraw: %s. A Number must be '
@@ -1324,7 +1391,6 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
             elif kind=='REMOVED':rooms.append(('DELETE',n))
             else:rooms.append(('MOVE',n))
         op['_rooms']=rooms
-        op['change']='CLUSTER'
         op['walls_kept']=len(plan['keep']);op['walls_replaced']=len(plan['replace'])
         op['walls_created']=len(plan['create']);op['walls_deleted']=len(plan['delete'])
         gplan.append(op)
@@ -1466,7 +1532,7 @@ def apply_cluster(doc,op,m,r,tag_templates,qa):
         op['status']='FAILED';op['reason']=str(e)
 
 
-qa=[];pout=[];gout=[];issues=[];summary={'Status':'FAILED'}
+qa=[];pout=[];gout=[];issues=[];summary={'Status':'FAILED'};apply=False
 rdoc=None;rdoc_closed=False
 START=time.perf_counter()
 TIMING=[]
@@ -1665,37 +1731,22 @@ try:
     mark('merge' if apply else 'preview')
 
     # ---- the audit trail ----
+    rows=audit_rows(pout,gout)
+    totals=audit_totals(pout,gout,issues)
+    audit_error=None
     try:
-        rows=[];totals=[0,0,0,0,0,0,0,0,0,0,0,0]
-        for op in gout:
-            rows.append([op.get('cluster',''),'',', '.join(op.get('stands',[])),
-                         op.get('change',''),op.get('status',''),
-                         op.get('walls_replaced',0),op.get('walls_created',0),
-                         op.get('walls_deleted',0),op.get('params_written',0),
-                         op.get('tags_moved',0),
-                         '%d wall(s) kept'%op.get('walls_kept',0)])
-        merged=sum(1 for x in gout if x['status'] in ('PLANNED','VERIFIED'))
-        skipped=sum(1 for x in gout if x['status']=='SKIPPED')
-        totals=[merged,skipped,
-                sum(1 for x in gout if x.get('change')=='MOVED'),
-                sum(1 for x in gout if x.get('change')=='RESIZED'),
-                sum(1 for x in gout if x.get('change')=='ADDED'),
-                sum(1 for x in gout if x.get('change')=='REMOVED'),
-                sum(x.get('walls_replaced',0) for x in gout),
-                sum(x.get('walls_created',0) for x in gout),
-                sum(x.get('walls_deleted',0) for x in gout),
-                sum(x.get('params_written',0) for x in gout),
-                sum(x.get('tags_moved',0) for x in gout),
-                sum(1 for x in issues if 'CONFLICT' in x.get('type',''))]
-        run_id=os.path.splitext(os.path.basename(rvt))[0]
-        write_audit(os.path.dirname(rvt),run_id,rows,totals,'APPLIED' if apply else 'PREVIEW',
-                    str(uuid.uuid4()))
+        ok,audit_error=write_audit(os.path.dirname(rvt),
+                                   os.path.splitext(os.path.basename(rvt))[0],
+                                   rows,totals,'APPLIED' if apply else 'PREVIEW',
+                                   str(uuid.uuid4()))
     except Exception as ex:
-        qa.append('AUDIT TRAIL: '+str(ex))
+        ok,audit_error=False,str(ex)
+    if not ok:qa.append('AUDIT TRAIL: '+str(audit_error))
     mark('audit')
 
     status,message,hard_fail,skipped,conflicts=judge_run(pout,gout,issues)
     summary={'Status':status,'Message':message,'Mode':'APPLIED' if apply else 'DRY RUN',
+             'Audit':'OK' if not audit_error else 'FAILED',
              'Clusters':sum(1 for x in gout if x['status'] in ('PLANNED','VERIFIED')),
              'Parameters':sum(1 for x in pout if x['status'] in ('PLANNED','VERIFIED')),
              'Geometry':sum(1 for x in gout if x['status'] in ('PLANNED','VERIFIED')),
@@ -1715,6 +1766,26 @@ except Exception as e:
     detail=traceback.format_exc()
     qa.append('FATAL: '+str(e));qa.append(detail)
     summary['Status']='FAILED';summary['Error']=str(e);summary['Trace']=detail
+    # A failed run still leaves a record behind, or the audit trail would read
+    # as if the run never happened. Nothing here may raise: the original
+    # exception is what the operator needs to see.
+    try:
+        path=os.path.dirname(rvt)
+        name=os.path.splitext(os.path.basename(rvt))[0]
+    except Exception:
+        path=name=None
+    if path is None:
+        summary['Audit']='SKIPPED'
+    else:
+        failure=[['','','NONE','RUN FAILED',0,0,0,0,0,str(e)]]
+        try:
+            ok,audit_error=write_audit(path,name,failure,audit_totals([],[],issues),
+                                       'APPLIED' if apply else 'PREVIEW',
+                                       str(uuid.uuid4()))
+        except Exception as ex:
+            ok,audit_error=False,str(ex)
+        summary['Audit']='OK' if ok else 'FAILED'
+        if not ok:qa.append('AUDIT TRAIL: the failed run could not be logged: '+str(audit_error))
 finally:
     # The Redraw document is closed whatever happened, and Main is brought back
     # to the foreground.
