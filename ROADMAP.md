@@ -136,9 +136,10 @@ Ordered roughly by value/effort; none are committed.
 6. **Hosted-element handling**: instead of skipping a cluster whose wall hosts a
    door/window/opening, move or recreate the hosted element with the wall.
 7. **Audit trail follow-ups**: persist the QA log and the baseline identity beside
-   the CSVs, and decide whether a stand-level "resized" change should be reported
-   separately (the summary column exists but a cluster currently reports `MOVED`).
-   This would extend the one-RVT/one-JSON folder contract carefully.
+   the CSVs. A cluster is now reported as `MOVED` when a Room's location point
+   moved and `RESIZED` when only its boundary changed, so the summary's
+   `clusters_resized` column is meaningful. Extending the audit further would
+   change the one-RVT/one-JSON folder contract, so it needs care.
 8. **Transaction/version hygiene**: decide whether to drop MVP prefixes from the
    apply transaction name; keep `schema_version` bumps coordinated across both
    graphs.

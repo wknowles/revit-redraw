@@ -1098,6 +1098,28 @@ def test_cluster_change_mixes_stand_statuses():
           'a moved stand and a conflict won by the Redraw should be MOVED')
 
 
+def test_cluster_change_distinguishes_moved_from_resized():
+    """A Room whose point stayed put was resized; one that moved was moved."""
+    class P(object):
+        def __init__(self, x, y):
+            self.X = x
+            self.Y = y
+            self.Z = 0.0
+
+    statuses = {'A': 'AFFECTED'}
+    main = {'A': {'room_point': P(0.0, 0.0)}}
+    same = {'A': {'room_point': P(0.0, 0.0)}}
+    moved = {'A': {'room_point': P(1.0, 0.0)}}
+    check(graph2.cluster_change(statuses, ['A'], main, same, 0.03) == 'RESIZED',
+          'a fixed point with a changed boundary should be RESIZED, got %r'
+          % graph2.cluster_change(statuses, ['A'], main, same, 0.03))
+    check(graph2.cluster_change(statuses, ['A'], main, moved, 0.03) == 'MOVED',
+          'a point that moved should be MOVED, got %r'
+          % graph2.cluster_change(statuses, ['A'], main, moved, 0.03))
+    check(graph2.cluster_change(statuses, ['A']) == 'MOVED',
+          'without the states the change should stay MOVED')
+
+
 def test_audit_rows_match_their_headers():
     """Both CSVs must be rectangular: a row shorter or longer than its header
     is a corrupt audit trail. The parameter log is part of the same file."""

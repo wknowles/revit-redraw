@@ -215,6 +215,11 @@ appended and the summary is rewritten:
 | `<title>.merge-log.csv` | append, one row per cluster plus one `change=PARAMETER` row per parameter decision | `run_utc, run_id, mode, cluster, stands, change, status, walls_replaced, walls_created, walls_deleted, params_written, tags_moved, details` |
 | `<title>.merge-summary.csv` | rewritten, one row for the run | `run_utc, run_id, mode, clusters_merged, clusters_skipped, clusters_moved, clusters_resized, clusters_added, clusters_removed, walls_replaced, walls_created, walls_deleted, params_written, tags_moved, conflicts` |
 
+`clusters_moved` counts clusters where a Room's location point moved by more than
+the tolerance; `clusters_resized` counts clusters whose boundary changed around a
+fixed point. A cluster with added or removed stands is `ADDED`, `REMOVED` or
+`MIXED` instead.
+
 `mode` is `APPLIED` or `PREVIEW`. A fatal run writes one `change=RUN FAILED` row
 with the exception text when it can locate the folder; if it cannot, `Audit` is
 `SKIPPED`. A failed write is reported in QA and sets `Audit` to `FAILED`.

@@ -59,6 +59,10 @@ Revit 2027 yet; `ROADMAP.md` section 1 is still the gate.
   defaults the graph actually ships: `Apply Updates` **false** (a dry run is the
   default) and `Redraw Wins On Conflicts` **true**. The docs had said Apply was true
   and did not mention the Redraw-wins default.
+- **Follow-up — `clusters_resized` is real.** `cluster_change` now compares the
+  Room location points: a cluster whose points moved is `MOVED`, and one whose
+  boundary changed around a fixed point is `RESIZED`, so the summary column is no
+  longer always 0.
 
 P8b's commit (`6146ac3`) is unsigned: 1Password signing was unavailable when it was
 made.

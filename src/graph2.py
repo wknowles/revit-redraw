@@ -1294,18 +1294,27 @@ def where(state):
         sum(len(loop) for loop in state.get('wall_loops', [])))
 
 
-def cluster_change(statuses, numbers):
+def cluster_change(statuses, numbers, main=None, redraw=None, tol=0.0):
     """What a cluster does, from the statuses of the stands it touches.
 
     A conflicted stand is merged like any other changed stand when the Redraw
-    wins, so it counts as a move. A cluster with no added or removed stand is
-    a move; a wall-only change has no stand and is a move too.
+    wins. A cluster with no added or removed stand is classified by where the
+    Rooms went: if any Room's location point moved by more than `tol` it is
+    MOVED, otherwise the boundary changed around a fixed point and it is
+    RESIZED. Without the states (or without location points) it is MOVED.
     """
     kinds=set('AFFECTED' if statuses.get(n)=='CONFLICT' else statuses.get(n)
               for n in numbers)
     if kinds=={'ADDED'}:return 'ADDED'
     if kinds=={'REMOVED'}:return 'REMOVED'
     if len(kinds)>1:return 'MIXED'
+    if main is not None and redraw is not None:
+        for n in numbers:
+            before=main.get(n);after=redraw.get(n)
+            if before is None or after is None:continue
+            a=before.get('room_point');b=after.get('room_point')
+            if a is not None and b is not None and dst(a,b)>tol:return 'MOVED'
+        return 'RESIZED'
     return 'MOVED'
 
 
@@ -1359,7 +1368,7 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
         if not affected and not conflicted:continue
         comp_no+=1;cid='C%d'%comp_no
         op={'cluster':cid,'stands':comp,'affected':affected,'status':'PLANNED',
-            'change':cluster_change(statuses,affected+conflicted)}
+            'change':cluster_change(statuses,affected+conflicted,m,r,tol)}
         dupes=sorted(set(comp)&duplicates)
         if dupes:
             reason=('Duplicate Room Number(s) in Main or the Redraw: %s. A Number must be '
