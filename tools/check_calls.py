@@ -28,8 +28,7 @@ def sources():
             for node in graph.get('Nodes', []):
                 if node.get('NodeType') == 'PythonScriptNode':
                     found.append((name, node.get('Code', '')))
-    for folder, name in [('phase0', 'phase0_probe.py'), ('src', 'graph2.py'),
-                         ('src', 'merge_core.py')]:
+    for folder, name in [('src', 'graph2.py'), ('src', 'merge_core.py')]:
         path = os.path.join(ROOT, folder, name)
         if os.path.isfile(path):
             with open(path, encoding='utf-8') as handle:

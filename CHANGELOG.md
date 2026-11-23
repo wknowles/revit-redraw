@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-23 — Phase 0 probe removed
+
+- **`phase0/` is deleted.** The probe answered its four runtime questions, and
+  its answers are implemented in `src/graph2.py` (per-element overrides,
+  DirectShape bands, writable Room Number, full-wall boundary curves). The
+  answers stay recorded in `HANDOFF.md` section 5 and the earlier CHANGELOG
+  entry.
+- **`tools/check_repo.py` no longer checks the probe graph or its stub harness.**
+  The remaining checks are the CRLF/compile check, graph 2 source match, the
+  offline tests and the Revit 2027 API audit. `check_api.py`,
+  `check_calls.py` and `build_api_index.py` no longer read the probe source.
+
 ## 2026-11-23 — Operator guide added and aligned with the current graphs
 
 - **`Revit Floorplan Redraw Process User Guide.md` is the operator-facing guide.** It is written in Simplified Technical English and covers Create Redraw, develop, Preview, Apply, conflicts, limits, undo, and the audit files.

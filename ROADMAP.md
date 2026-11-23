@@ -112,8 +112,8 @@ mocked pure-function tests passed. Run this checklist first:
   Summary says `Redraw document closed: NO` and QA names it.
 - **Directory inputs ship blank** — operators must select the folder on every run.
   This is intentional: local paths are not published.
-- **Offline tests only** — `src/test_*.py`, `phase0/test_probe.py` and
-  `tools/check_repo.py` cover the planner, merge core, probe and the static
+- **Offline tests only** — `src/test_*.py` and
+  `tools/check_repo.py` cover the planner, merge core and the static
   contracts, but nothing has been run inside Revit 2027 yet: section 1 is still the
   real gate. `.dyn` edits remain hand/programmatic JSON surgery (see `AGENTS.md`).
 - Graph 2's apply transaction is still named `MVP2.4B6 - Merge Redraw Updates`

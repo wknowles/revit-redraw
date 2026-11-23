@@ -32,8 +32,6 @@ src/merge_core.py        pure-Python wall matching + clustering engine
 src/test_merge_core.py   unit tests for the engine
 src/test_graph2_plan.py  planning tests with stubbed Revit models
 src/build_graph2.py      injects src/ into the .dyn (--check verifies)
-phase0/phase0_probe.py   the Phase 0 diagnostic probe
-phase0/test_probe.py     stubbed-model harness for the probe
 tools/check_repo.py      runs every static check
 tools/check_calls.py     AST call-arity check
 tools/check_api.py       Revit API audit against the 2027 documentation
@@ -206,8 +204,8 @@ this session because the calls were wrapped in `except` blocks.
 
 ## 9. Gotchas for the next session
 
-- **Never hand-edit a `.dyn`.** Edit `src/graph2.py` or
-  `phase0/phase0_probe.py`, then `python3 src/build_graph2.py`.
+- **Never hand-edit a `.dyn`.** Edit `src/graph2.py`, then
+  `python3 src/build_graph2.py`.
 - **`.dyn` files are CRLF JSON.** `python3 src/build_graph2.py` preserves that;
   a plain `json.dump` does not. Read with `newline=''` or you silently lose the
   CRLF.
@@ -226,7 +224,6 @@ this session because the calls were wrapped in `except` blocks.
   guaranteed to exist on a DirectShape, and the old cleanup silently skipped
   everything when it was missing. Use `DirectShape.SetName`, and let the override
   sweep (`View.GetElementOverrides`) catch anything unmarked.
-- `phase0/` is a diagnostic tool, **not** part of the 1 → 2 workflow.
 - The `ROADMAP.md` in-Revit checklist has still never been run against the
   rebuilt graph.
 

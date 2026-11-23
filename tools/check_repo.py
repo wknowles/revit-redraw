@@ -5,11 +5,9 @@
 
   1. the .dyn files parse as JSON and keep CRLF line endings
   2. the Python embedded in each .dyn compiles
-  3. phase0/Phase 0 Prototype.dyn matches phase0/phase0_probe.py
-  4. the phase 0 probe survives its stubbed Revit models
-  5. every Revit API call matches the Revit 2027 documentation
+  3. every Revit API call matches the Revit 2027 documentation
 
-None of these need Revit. Check 5 uses tools/revit_api_2027.json, which is
+None of these need Revit. Check 3 uses tools/revit_api_2027.json, which is
 refreshed with python3 tools/build_api_index.py.
 """
 import json
@@ -133,12 +131,8 @@ def main():
         print('    ' + problem)
     failures.extend(problems)
 
-    failures.extend(run('phase0 graph matches phase0_probe.py',
-                        [PYTHON, os.path.join(ROOT, 'phase0', 'build_dyn.py'), '--check']))
     failures.extend(run('graph 2 matches src/',
                         [PYTHON, os.path.join(ROOT, 'src', 'build_graph2.py'), '--check']))
-    failures.extend(run('phase0 probe survives its stubbed models',
-                        [PYTHON, os.path.join(ROOT, 'phase0', 'test_probe.py')]))
     failures.extend(run('merge core unit tests',
                         [PYTHON, os.path.join(ROOT, 'src', 'test_merge_core.py')]))
     failures.extend(run('graph 2 planning tests',

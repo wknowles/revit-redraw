@@ -116,10 +116,6 @@ def types_used_in_repo():
             for node in graph.get('Nodes', []):
                 if node.get('NodeType') == 'PythonScriptNode':
                     sources.append((name, node.get('Code', '')))
-    probe = os.path.join(ROOT, 'phase0', 'phase0_probe.py')
-    if os.path.isfile(probe):
-        with open(probe, encoding='utf-8') as handle:
-            sources.append(('phase0/phase0_probe.py', handle.read()))
     for label, source in sources:
         for match in re.finditer(r'from\s+(Autodesk\.Revit[A-Za-z.]*)\s+import\s*\(([^)]*)\)',
                                  source, re.S):

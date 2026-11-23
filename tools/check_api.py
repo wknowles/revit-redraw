@@ -63,11 +63,6 @@ def sources():
             for node in graph.get('Nodes', []):
                 if node.get('NodeType') == 'PythonScriptNode':
                     found.append((name, node.get('Code', '')))
-    for folder, name in [('phase0', 'phase0_probe.py')]:
-        path = os.path.join(ROOT, folder, name)
-        if os.path.isfile(path):
-            with open(path, encoding='utf-8') as handle:
-                found.append((folder + '/' + name, handle.read()))
     return found
 
 
