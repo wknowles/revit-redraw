@@ -1202,7 +1202,11 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
                 if n not in affected:affected.append(n)
             op['affected']=affected
         mw={};rw={};bw=[]
-        for n in affected:
+        # Every stand of the cluster contributes its walls, not just the affected
+        # ones. A wall shared with an unchanged neighbour already exists in Main,
+        # so matching only against the affected walls would plan it as a create
+        # and leave a duplicate on top of it.
+        for n in comp:
             if n in m:
                 for wd in state_walls(m[n]).values():mw.setdefault(wd['element_id'],wd)
             if n in r:

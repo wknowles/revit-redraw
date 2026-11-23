@@ -334,6 +334,34 @@ def test_added_stand_is_planned():
     check(gplan[0]['walls_created'] == 1, 'its wall should be created')
 
 
+def test_added_stand_reuses_the_neighbours_existing_wall():
+    """A stand added next to an unchanged one shares its wall. That wall is
+    already in Main, so it must be kept, never created again on top of itself:
+    a duplicate coincident wall is invisible to the room-boundary checks."""
+    shared = Curve(10, 0, 10, 10)
+    a_outer = Curve(0, 0, 10, 0)
+    b_outer = Curve(20, 0, 20, 10)
+    base = {'A01': stand('A01', [(10, shared), (11, a_outer)], 1)}
+    main = dict(base)
+    redraw = {'A01': stand('A01', [(10, shared), (11, a_outer)], 1),
+              'A02': stand('A02', [(10, shared), (21, b_outer)], 2)}
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
+    check(gplan[0]['status'] == 'PLANNED', 'it should be planned, got %r'
+          % gplan[0].get('reason'))
+    keep = [wall['ref']['element_id'] for wall in gplan[0]['_plan']['keep']]
+    created = [wall['ref']['element_id'] for wall in gplan[0]['_plan']['create']]
+    check(10 in keep, 'the shared wall should be kept, got keep=%s' % keep)
+    check(10 not in created,
+          'the shared wall must not be created again, got %s' % created)
+    check(created == [21],
+          "only the added stand's new wall should be created, got %s" % created)
+    check(gplan[0]['walls_created'] == 1, 'one wall should be created')
+    rooms = gplan[0]['_rooms']
+    check(('ADD', 'A02') in rooms,
+          'only the added stand needs room work, got %s' % rooms)
+
+
 def test_removed_stand_is_planned():
     wall_a = Curve(0, 0, 10, 0)
     base = {'A': stand('A', [(11, wall_a)], 1),
