@@ -1007,6 +1007,92 @@ def test_write_audit_reports_a_failure():
     check(ok is False and error, 'a failed audit must say why, got %r' % (ok,))
 
 
+class FakeVector(object):
+    """Only what move_room_to_redraw asks of the delta: its length."""
+
+    def __init__(self, x, y, z=0.0):
+        self.X = x
+        self.Y = y
+        self.Z = z
+
+    def GetLength(self):
+        return (self.X ** 2 + self.Y ** 2 + self.Z ** 2) ** 0.5
+
+
+def test_blank_directory_is_rejected():
+    """A blank Directory used to reach folder.strip() as None."""
+    for blank in (None, '', '   '):
+        try:
+            graph2.check_inputs(blank, 0.01, 0.25)
+        except Exception as ex:
+            check('Select the Redraw directory' in str(ex),
+                  'the message should ask for the directory, got %r' % str(ex))
+        else:
+            check(False, 'a blank directory should be rejected, got %r' % (blank,))
+
+
+def test_spacing_must_be_positive():
+    """sp=0 divides by zero in smp/resample while planning."""
+    for spacing in (0.0, -0.25):
+        try:
+            graph2.check_inputs('/a/folder', 0.01, spacing)
+        except Exception as ex:
+            check('boundary sample spacing' in str(ex),
+                  'the message should name the spacing, got %r' % str(ex))
+        else:
+            check(False, 'spacing %r should be rejected' % (spacing,))
+
+
+def test_tolerance_must_not_be_negative():
+    for tolerance in (-0.01, float('inf')):
+        try:
+            graph2.check_inputs('/a/folder', tolerance, 0.25)
+        except Exception as ex:
+            check('comparison tolerance' in str(ex),
+                  'the message should name the tolerance, got %r' % str(ex))
+        else:
+            check(False, 'tolerance %r should be rejected' % (tolerance,))
+
+
+def test_coarse_spacing_warns_but_is_not_fatal():
+    """The sliders allow a spacing far above the tolerance; say so, don't fail."""
+    folder, tol, spacing, warnings = graph2.check_inputs('/a/folder', 0.01, 1.0)
+    check(folder == '/a/folder' and tol == 0.01 and spacing == 1.0,
+          'the inputs should come back unchanged, got %r' % ((folder, tol, spacing),))
+    check(len(warnings) == 1 and 'may be missed' in warnings[0],
+          'a coarse spacing should warn once, got %s' % warnings)
+    folder, tol, spacing, warnings = graph2.check_inputs('/a/folder', 0.01, 0.05)
+    check(warnings == [], 'a spacing close to the tolerance should not warn, got %s' % warnings)
+
+
+def test_refused_room_move_raises():
+    """A move Revit refuses is not a move that happened."""
+    class RefusingLocation(graph2.LocationPoint):
+        def __init__(self, point):
+            self.Point = point
+
+        def Move(self, delta):
+            return False
+
+    class Room(object):
+        def __init__(self, point):
+            self.Location = RefusingLocation(point)
+
+    original = graph2.XYZ
+    graph2.XYZ = FakeVector
+    try:
+        try:
+            graph2.move_room_to_redraw(Room(Point(0.0, 0.0)),
+                                       {'room_point': Point(5.0, 5.0)})
+        except Exception as ex:
+            check('could not be moved' in str(ex),
+                  'the message should say the move was refused, got %r' % str(ex))
+        else:
+            check(False, 'a refused move must raise')
+    finally:
+        graph2.XYZ = original
+
+
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]

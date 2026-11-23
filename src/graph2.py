@@ -319,6 +319,32 @@ def desired(r):
     if r[0]=='NO_VALUE':return ''
     return None
 
+def check_inputs(folder,tol,sp):
+    """Validate the raw Directory and slider inputs.
+
+    Returns (folder, tolerance, spacing, warnings). The sliders allow 0.0,
+    which divides by zero in the boundary sampling, and a blank Directory
+    reaches the path handling as None. Both are reported by name instead of as
+    an internal error.
+    """
+    text='' if folder is None else str(folder).strip()
+    if not text:
+        raise Exception('Select the Redraw directory (the folder that holds one .rvt and its .baseline.json).')
+    try: tol=float(tol)
+    except Exception: raise Exception('The comparison tolerance must be a number of metres.')
+    try: sp=float(sp)
+    except Exception: raise Exception('The boundary sample spacing must be a number of metres.')
+    if not math.isfinite(tol) or tol<0:
+        raise Exception('The comparison tolerance must be zero or a positive number of metres.')
+    if not math.isfinite(sp) or sp<=0:
+        raise Exception('The boundary sample spacing must be a positive number of metres.')
+    warnings=[]
+    if tol>0 and sp>tol*8:
+        warnings.append('Boundary sample spacing %.3g m is much larger than the comparison '
+                        'tolerance %.3g m; features shorter than the spacing may be missed.'
+                        %(sp,tol))
+    return text,tol,sp,warnings
+
 def files(folder):
     if not folder or not os.path.isdir(folder):raise Exception('Redraw directory is invalid')
     ns=os.listdir(folder)
@@ -411,7 +437,9 @@ def move_room_to_redraw(main_room,redraw):
     if not isinstance(loc,LocationPoint): raise Exception('Main Room has no movable location point')
     current=loc.Point
     delta=XYZ(target.X-current.X,target.Y-current.Y,0.0)
-    if delta.GetLength()>1e-9: loc.Move(delta)
+    if delta.GetLength()>1e-9 and not loc.Move(delta):
+        raise Exception('The Main Room could not be moved (Revit refused the move to %.3f, %.3f).'
+                        %(target.X,target.Y))
     return target
 
 _ROOM_TAGS={}
@@ -884,8 +912,9 @@ def create_room(host, level, redraw_state, number, parameter_values):
     if isinstance(location, LocationPoint):
         current = location.Point
         delta = XYZ(point.X - current.X, point.Y - current.Y, 0.0)
-        if delta.GetLength() > 1e-9:
-            location.Move(delta)
+        if delta.GetLength() > 1e-9 and not location.Move(delta):
+            raise Exception('The new Room could not be moved (Revit refused the move to %.3f, %.3f).'
+                            %(point.X,point.Y))
     return room, written
 
 
@@ -1551,9 +1580,10 @@ def timing_note():
 
 try:
     if doc is None:raise Exception('No active Main document')
-    folder=pv(iv(0));tol_m=float(iv(1,.01));sp_m=float(iv(2,.25))
+    folder,tol_m,sp_m,notes=check_inputs(pv(iv(0)),iv(1,.01),iv(2,.25))
+    qa.extend(notes)
     apply=bool(iv(3,False));redraw_wins=bool(iv(4,False))
-    rvt,side=files(os.path.abspath(folder.strip()))
+    rvt,side=files(os.path.abspath(folder))
     if same_path(doc.PathName,rvt):
         raise Exception('Active document is the Redraw. Open Main before running Compare and Update Redraw.')
     for open_doc in doc.Application.Documents:
