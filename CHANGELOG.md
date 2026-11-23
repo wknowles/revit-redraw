@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-23 — Operator guide added and aligned with the current graphs
+
+- **`Revit Floorplan Redraw Process User Guide.md` is the operator-facing guide.** It is written in Simplified Technical English and covers Create Redraw, develop, Preview, Apply, conflicts, limits, undo, and the audit files.
+- **The guide now matches the shipped behaviour.** It records the saved `REDRAW WINS ON CONFLICTS` default of **true**, the active-view Preview, the per-cluster transaction, the summary fields, hosted-element and duplicate-Number gates, and the six parameters that merge versus the nine that are only audited.
+- **`AGENTS.md` keeps the guide in the documentation set.** Update the guide in the same change as any user-visible behaviour, input, default, status, or output.
+
 ## 2026-11-23 — Patch series P1-P9: an apply that cannot half-commit, and docs to match
 
 The merge had been made wall-level, but a cluster that failed part way through
