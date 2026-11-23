@@ -1,5 +1,450 @@
 # Changelog
 
+## 2026-11-23 — In-Revit validation recorded; parameter docs aligned; process diagram
+
+- **The rebuilt graph is validated in Revit 2027.** `ROADMAP.md` section 1 is now
+  the regression checklist to run again after a Revit or Dynamo upgrade.
+- **`DESIGN.md` and `AGENTS.md` now match the code for duplicate Room Numbers.** A
+  duplicate Number quarantines the geometry cluster and stops that stand's
+  parameter update. Parameter writes for other stands in the cluster are
+  independent of the geometry plan. The old wording said the whole cluster's
+  parameters stayed as Main had them.
+- **The user guide has a Mermaid process diagram** and matches the current inputs,
+  outputs, statuses, and error messages.
+
+## 2026-11-23 — Phase 0 probe removed
+
+- **`phase0/` is deleted.** The probe answered its four runtime questions, and
+  its answers are implemented in `src/graph2.py` (per-element overrides,
+  DirectShape bands, writable Room Number, full-wall boundary curves). The
+  answers stay recorded in `HANDOFF.md` section 5 and the earlier CHANGELOG
+  entry.
+- **`tools/check_repo.py` no longer checks the probe graph or its stub harness.**
+  The remaining checks are the CRLF/compile check, graph 2 source match, the
+  offline tests and the Revit 2027 API audit. `check_api.py`,
+  `check_calls.py` and `build_api_index.py` no longer read the probe source.
+
+## 2026-11-23 — Operator guide added and aligned with the current graphs
+
+- **`Revit Floorplan Redraw Process User Guide.md` is the operator-facing guide.** It is written in Simplified Technical English and covers Create Redraw, develop, Preview, Apply, conflicts, limits, undo, and the audit files.
+- **The guide now matches the shipped behaviour.** It records the saved `REDRAW WINS ON CONFLICTS` default of **true**, the active-view Preview, the per-cluster transaction, the summary fields, hosted-element and duplicate-Number gates, and the six parameters that merge versus the nine that are only audited.
+- **`AGENTS.md` keeps the guide in the documentation set.** Update the guide in the same change as any user-visible behaviour, input, default, status, or output.
+
+## 2026-11-23 — Patch series P1-P9: an apply that cannot half-commit, and docs to match
+
+The merge had been made wall-level, but a cluster that failed part way through
+could still leave a deleted Room or a rebuilt boundary behind, the planner could
+delete a wall that hosted a door, and the audit trail described a plan that the
+run had not followed. Nine patches close those gaps. None of this has been run in
+Revit 2027 yet; `ROADMAP.md` section 1 is still the gate.
+
+- **P1 — one cluster is one atomic change.** A planned cluster is applied by
+  `apply_cluster` inside a `SubTransaction` of the merge transaction. A failure
+  rolls that cluster back and marks it `FAILED`; the other clusters still commit.
+  Every `Commit()` (preview, preview clear, cluster, merge) is compared with
+  `TransactionStatus.Committed`, and anything else aborts the run.
+- **P2 — Main-only walls stay, and a replacement is guarded like a delete.**
+  `Redraw Wins On Conflicts` no longer deletes a wall Main added after the Redraw
+  was cut, and a replaced wall now passes the shared-wall guard as well, because
+  the apply deletes it before the Redraw version is created.
+- **P3 — Rooms the merge cannot manage are protected.** Blank-Numbered Rooms stay
+  unmanaged, duplicate Numbers quarantine their cluster, and `collect_exclusions`
+  protects every wall those Rooms share, so the merge cannot delete a wall and
+  merge two Rooms into one region.
+- **P4 — created walls are matched against the whole cluster.** Every stand in the
+  cluster contributes its walls, so a wall shared with an unchanged neighbour is
+  matched instead of being created again on top of itself.
+- **P5 — skipped work stays visible and the status is honest.** `public_plan` keeps
+  `SKIPPED` clusters (with their reason) in a dry run. `judge_run` sets
+  `SUCCESS` / `SUCCESS WITH WARNINGS` / `COMPLETED WITH ERRORS`, `Message` carries
+  the first reason, `Summary['Audit']` is added, `MAIN_REMOVED` is reported as an
+  issue, and `BOTH_REMOVED` is a distinct status.
+- **P6 — the audit trail matches reality.** The log is append-only with the columns
+  `run_utc, run_id, mode, cluster, stands, change, status, walls_replaced,
+  walls_created, walls_deleted, params_written, tags_moved, details` — one row per
+  cluster plus one `change=PARAMETER` row per parameter decision. The summary is
+  rewritten per run with the cluster/wall/parameter totals. A failed run writes a
+  `RUN FAILED` row when it can. Both CSVs are gitignored so a local run cannot
+  publish stand data.
+- **P7 — inputs are checked and a refused move fails its cluster.** A blank
+  Directory, a non-numeric or negative tolerance and a non-positive spacing are
+  refused by name; a `Location.Move` that returns false raises instead of leaving
+  the Room behind.
+- **P7b — the default spacing is quiet.** The coarse-spacing warning only fires
+  above both `8 x tolerance` and the shipped 0.25 m, so a default run has no
+  warning.
+- **P8 — wall level is honoured and hosted elements are never lost.** A rebuilt
+  wall uses its own Redraw level (the cluster level is the fallback). A cluster is
+  skipped before any mutation when a created/replaced wall's type or level is
+  missing in Main, and when a Main wall it would delete or replace hosts a
+  `FamilyInstance` or `Opening` — Revit cascades those with the wall and the merge
+  cannot put them back. The issue names the hosted elements.
+- **P8b — attribute-only wall edits are merged.** `stand_status` compares the wall
+  attributes (type, height, offset, flip, level) as well as the geometry, so a wall
+  that changed without moving is `AFFECTED` and is rebuilt instead of reported
+  `ALREADY`.
+- **P9 — the docs catch up.** `AGENTS.md`, `DESIGN.md`, `ROADMAP.md` and this file
+  now describe the per-cluster transaction, the planner gates, the status strings,
+  the planner's input checks and the two CSV contracts. They also record the saved
+  defaults the graph actually ships: `Apply Updates` **false** (a dry run is the
+  default) and `Redraw Wins On Conflicts` **true**. The docs had said Apply was true
+  and did not mention the Redraw-wins default.
+- **Follow-up — `clusters_resized` is real.** `cluster_change` now compares the
+  Room location points: a cluster whose points moved is `MOVED`, and one whose
+  boundary changed around a fixed point is `RESIZED`, so the summary column is no
+  longer always 0.
+- **Follow-up — a stand re-created in the Redraw replaces Main's version.** A
+  stand that exists in Main and the Redraw but not the baseline at a new location
+  shares no wall element id with its Redraw copy. When `Redraw Wins On Conflicts`
+  resolves that conflict, Main's old walls are now deleted with the old geometry
+  instead of being retained as "later Main work". P2's fix had left them behind,
+  so only the Room moved.
+- **Follow-up — a moved stand vacates its old shared wall.** The shared-wall
+  guard treated any stand that still existed as still occupying its side, so a
+  cluster where one stand left for an island and another expanded into the gap
+  was skipped for "one region" even though the Redraw had resolved it. The guard
+  now ignores a stand whose Room point moved away, and the regressions that model
+  a resize pin the Room point the way Revit keeps it.
+- **Follow-up — `Verify ...: 'dict' object is not callable` fixed.** The preview
+  block runs at module level and assigned `state=m.get(number)`, overwriting the
+  `state()` reader for the rest of the run. In apply mode verification runs after
+  the preview, so every affected stand failed to collect and every applied
+  cluster was reported `VERIFY_FAILED` even though the merge had succeeded. The
+  loop variable is now `mstate`, and `tools/check_repo.py` gained a static check
+  that fails on any module-level assignment which shadows a function name.
+
+P8b's commit (`6146ac3`) is unsigned: 1Password signing was unavailable when it was
+made.
+
+## 2026-11-22 — `View` import, and a check for the bug class
+
+The QA after the first successful apply read `PREVIEW: could not sweep the views
+for leftovers (name 'View' is not defined)`. The cleanup's second pass calls
+`FilteredElementCollector(host).OfClass(View)`, but `View` was never imported:
+the old code only ever used `doc.ActiveView`, never the type name. The pass was
+wrapped in `try/except` so the run continued, and the QA line was the only sign.
+
+- **`View` is imported.** The sweep now runs, so walls left painted in a preview
+  colour are reset, and a band with no marker at all is still found.
+- **`tools/check_api.py` gained a fourth check**: a Revit type used as a bare
+  name (`OfClass(View)`, `isinstance(x, Wall)`) must be imported or defined in
+  the source. It audits with the AST, so a name bound anywhere counts, and it
+  only fires for names in the API index. It reports this exact bug on the graph
+  as it was before the fix, and nothing on the fixed graph. Checks 1-3 could not
+  see it: they only audit `Type.Member` accesses on *imported* types.
+
+## 2026-11-22 — Large-model performance, and a timing line
+
+The first run on a real event with several thousand stands took about 45
+seconds wall clock, and Revit's CPU read 6% throughout. That is not idle: the
+Revit API is single-threaded, so one saturated core is all a large model ever
+shows. The time was in graph 2's shared scan-and-plan path - slow in both a dry
+run and an apply - so the fixes are there:
+
+- **An untouched stand is no longer sampled.** The Redraw is a copy of Main, so
+  an unchanged stand has exactly the same boundary points. `merge_core.
+  boundary_points` / `same_boundary` compare those directly (rounded to 1e-6
+  ft, order-insensitive); the sampled `bd()` fallback only runs for a boundary
+  that really differs. This removed on the order of millions of
+  `Curve.Project` interop calls per run. The comparison is deliberately *not*
+  translation invariant, because a boundary that moved has to be measured.
+- **The status pass is computed once.** `plan_clusters` already computed
+  `statuses`, `usage`, `adjacency` and `components`; the main body recomputed
+  all four and used none of them. The duplicate pass is gone.
+- **The Redraw's wall buckets are built once**, not once per cluster. Building
+  them per cluster was quadratic in the number of stands.
+- **`ALREADY` is decided first** in `stand_status`, so an unchanged stand costs
+  one comparison instead of three.
+- **Lookups are cached per run**: wall types (was one full collection per
+  created wall), levels (was one per cluster and per added stand), the wall
+  types in `collect_walls` (was one `GetElement` per wall), the wall
+  descriptions shared by two neighbouring stands, and the room tag index (was
+  one full tag collection and one call per tag for every moved stand).
+- **The verification pass only reads the stands that changed**, instead of
+  every room in Main again.
+- **A regeneration is skipped when the step before it changed nothing**, so a
+  cluster that only creates walls no longer pays for three of them.
+- **QA now ends with a `Timing:` line** - one entry per phase (setup, open
+  Redraw, baseline, Main collect, Redraw collect, Redraw wall scan, plan,
+  preview/merge, audit, close) plus a total. The next slow run says where the
+  time went instead of inviting a guess.
+
+Offline: `plan_clusters` on a synthetic 3,000-stand model with 12,000 walls and
+300 changed stands now plans in ~4.4 s under the test fakes (which take the
+slow, fully sampled point path), where the per-cluster bucket rebuild alone used
+to cost ~23 s. Unit tests cover the fast path: unchanged boundaries are not
+sampled, a moved boundary still is.
+
+## 2026-11-22 — No link, tags for added stands, and a preview that always clears
+
+The first apply run on the live model created stand A05's walls and Room, but
+left three things wrong: the new Room had no tag, one Ctrl+Z did not put Main
+back where it was, and the preview bands from the dry run survived the apply.
+
+- **The Redraw is no longer linked into Main.** Loading a link clears Revit's
+  undo history, and a link type created before the merge can never be removed by
+  the same undo that removes the merge - so with a link, one Ctrl+Z always left
+  the Redraw visible in the plan. Graph 2 now opens the Redraw as a separate
+  document (`Application.OpenDocumentFile`), reads it, and closes it in
+  `finally`. No transform is needed: graph 1 writes the Redraw as a copy of
+  Main, so its internal coordinates are Main's. The merge is now the only
+  transaction that edits Main.
+- **Undo is one step for real.** An apply is two transactions - the old preview
+  is cleared first (`Redraw Merge - Clear Preview`), *then* the merge runs
+  (`MVP2.4B6 - Merge Redraw Updates`) - so undoing the merge does not bring the
+  bands back. A dry run is one transaction.
+- **A stand the Redraw added gets Room Tags**, not just a Room: one tag per view
+  that already carries Room Tags (`Document.Create.NewRoomTag`), with the type
+  that view uses (`Element.ChangeTypeId`), on the Room's location point. A view
+  that refuses the tag is reported in QA, not fatal.
+- **Tags of a moved stand are re-centred in every view that has them**, not only
+  the active view.
+- **The preview always clears.** Bands are marked with
+  `DirectShape.SetName('REDRAW MERGE PREVIEW v=<view> w=<walls>')` as well as in
+  their Comments - the Comments parameter is not guaranteed to exist on a
+  DirectShape, and the old cleanup silently skipped everything when it was
+  missing. After the markers, every view is swept with
+  `View.GetElementOverrides()` for the four preview colours: an unmarked band
+  from an older run is deleted, a recoloured wall is reset. The Summary reports
+  how much was removed.
+- **The run is readable now.** The Summary gained `Rooms created` and
+  `Redraw document closed`; QA gains one line per applied cluster, a line per
+  added stand naming which of the six merged parameters are blank in the Redraw
+  (A05's `params_written: 0` was invisible before), and any tag/preview
+  problem.
+- `LinkElementId` joined `tools/revit_api_2027.json`; the API audit and the
+  offline tests cover the new marker round trip.
+
+## 2026-11-22 — Wall level merge, visual preview and audit trail
+
+- Graph 2 failed on its first run after the rebuild, and the reason was
+  invisible: **the QA watch was never wired**. `OUT = (summary, pout, gout,
+  issues, qa)` only wired indices 0-3, so `qa` - which carries the fatal
+  message - went nowhere. The Summary only said `Status: Failed`.
+- Fixed, and the same class of problem cannot recur:
+  - **Graph 2's QA is now wired** to a watch (`OUT[4]`), and the watch labels
+    were corrected: `Parameter Conflicts` is really `Conflicts / Skips` and
+    `Errors` is really `Geometry Updates`.
+  - **The Summary now carries the error and the traceback**, so a failure is
+    diagnosable from the Summary watch alone.
+  - **`tools/check_calls.py`** compares every call against the signature of the
+    function it calls. It found three wrong argument counts in the new code -
+    `component_level`, `preview_height` and `draw_preview` - one of which was
+    the actual failure. The check is now part of `tools/check_repo.py`.
+  - **`src/test_graph2_plan.py`** drives the planning with stand, wall and curve
+    fakes, so the glue between the Revit data and the merge core is tested
+    offline. It found a real bug: `Redraw Wins On Conflicts` overrode a
+    *wall level* conflict but not a *stand level* one, so a stand where both
+    sides changed differently was still skipped.
+
+
+- Graph 2 is rebuilt around **wall level** comparison instead of room level, so
+  a cluster of connected stands merges as one change:
+  - a Main wall that already sits where a Redraw wall sits is **kept**;
+  - a Main wall with no Redraw counterpart is **deleted**;
+  - a Redraw wall with no Main counterpart is **created**;
+  - a wall whose type, height, offset or flip changed is **rebuilt**;
+  - a wall added to Main after the Redraw was cut is **left alone**.
+- Stands the Redraw **added** are created (walls first, then the Room, then its
+  Number and the six merged parameters), and stands the Redraw **deleted** are
+  deleted. Revit auto-numbers new rooms, so an added stand's Number is set
+  explicitly.
+- The stands that share a wall are clustered, and the affected set turns out to
+  be closed over shared walls already - a shared wall that moves changes both
+  neighbours, so no separate clustering algorithm is needed.
+- `ALREADY` is now distinguished from `CONFLICT`: when Main already is what the
+  Redraw wants there is nothing to do, and that is no longer reported as a
+  conflict.
+- The business rules still hold: only `Closed Wall - RX` and `Open Wall - RX`
+  walls may be rebuilt, a boundary that is not made of walls is skipped, and
+  level mismatches are skipped.
+- **Visual preview.** A dry run now draws the difference on the plan:
+  - **blue** - the Redraw's new wall positions, as filled `DirectShape` bands;
+  - **amber** - the Main walls the merge will rebuild or delete;
+  - **red** - the Main walls Main changed itself, which are left alone.
+
+  The two Main colours recolour the existing walls with
+  `View.SetElementOverrides`, so they need no temporary geometry; only the
+  Redraw's new positions need a band. The preview is removed by the next run.
+- **Audit trail.** Every run appends to `<title>.merge-log.csv` and rewrites
+  `<title>.merge-summary.csv` next to the Redraw - flat CSV, one row per change,
+  for business users.
+- Graph 2 gained a fifth input, `Redraw Wins On Conflicts` (default false).
+  With it off, a cluster where Main and the Redraw disagree is blocked and
+  reported; with it on, the Redraw's version wins and the overwrite is recorded.
+- `src/merge_core.py` grew the component planner, and the tests grew to 25,
+  including the business case: four stands around a shared cross of walls, where
+  moving one wall must rebuild that wall once and leave the other seven alone.
+
+## 2026-11-22 — Phase 0 answered; merge core built; four live bugs fixed
+
+- **All four Phase 0 questions are answered**, on a test model and on a live
+  production model:
+  - **A** `View.SetElementOverrides(ElementId, OverrideGraphicSettings)` with
+    `SetCutForegroundPatternColor` **does** recolour an existing wall in a
+    floor plan, and reads clearly.
+  - **B** a `GeometryCreationUtilities.CreateExtrusionGeometry` band in
+    `Generic Annotations`, coloured with the same override, **renders filled**
+    in a floor plan — not as an outline.
+  - **C** a Room's `Number` is writable three ways: the `SpatialElement.Number`
+    property (it has a setter), `LookupParameter('Number')` and
+    `BuiltInParameter.ROOM_NUMBER`.
+  - **D** room boundary curves are **not** trimmed to the room:
+    `BoundarySegment.GetCurve()` returns the full wall location curve, and a
+    wall shared by two rooms carries the identical curve in both rooms' segment
+    lists. So baseline curves can be compared with Main's wall curves exactly,
+    and a shared wall de-duplicates by curve.
+- Because the override recolours the *existing* wall, the preview needs no
+  geometry for the "Main changed" and "conflict" halves — only the Redraw's new
+  positions need a band.
+- Fixed the problems the first live run of the rebuilt graph 2 found:
+  - **The removed rooms are now deleted before the walls.** Deleting a shared
+    wall while both rooms still exist puts two rooms in one region, and Revit
+    answers that with a modal warning; clicking "Delete Room" in it edits the
+    document outside the merge's transaction, which broke the run with
+    "Modification of the document is forbidden".
+  - **No regeneration after the commit.** Committing regenerates by itself,
+    and regenerating outside a transaction is refused once anything else has
+    touched the document.
+  - **The plan now sees the Redraw's walls that no longer bound a room.**
+    Deleting a stand in the Redraw leaves its walls behind as orphans. The
+    plan only looked at walls that bound a room, so those orphans looked
+    deleted and would have been taken out of Main - a wall the designer kept
+    would have been destroyed. The Redraw's walls are now inventoried, and any
+    that match a baseline wall of the cluster count as part of it.
+  - **The preview bands every wall the merge touches**, not only the Redraw's
+    new positions, so it is visible even where recolouring a wall does not
+    take. It also reports how many bands it drew and how many walls it
+    recoloured, and any failure, instead of counting what it planned to do.
+- Fixed the second round of live run failures:
+  - **The preview needed a transaction.** Creating the `DirectShape` bands and
+    recolouring the walls both modify the document, so the preview was refused
+    with "Attempt to modify the model outside of transaction".
+  - **A deleted stand was treated as a moved one.** The room loop fell through
+    to the "move" branch for a stand that had already been deleted, which
+    failed the cluster.
+  - **Removing a wall that separates two stands which both keep a room is now
+    refused.** That would put both rooms in one region, and Revit's answer to
+    that is a modal warning that edits the document outside the merge's
+    transaction - which is what broke the run and left the model needing two
+    undos.
+  - **Undo is one step again.** The Redraw link is now removed inside the merge
+    transaction, so undoing the merge undoes the lot. The verification compares
+    against a snapshot of the Redraw's geometry taken as plain points, so it no
+    longer needs the link to be alive.
+- Full review after the third live run, against the Revit 2027 documentation:
+  - **The Redraw link is now always reloaded.** `RevitLinkType.Load()` "loads or
+    reloads", but only after the link is unloaded, and the old code reused an
+    already loaded link. The merge could therefore run against a Redraw that
+    was stale on disk - which would explain a plan that did not match the
+    Redraw the operator had just edited.
+  - **A stand with no boundary in the Redraw is now treated as removed.** A
+    room that is still there but bounds nothing is not a stand any more, so
+    its room is taken out of Main too.
+  - **The QA now says where every stand of a skipped cluster actually is** -
+    baseline, Main and Redraw, with its area and how many boundary walls it
+    has - so the operator can see whether the Redraw really lost the stand.
+  - **The preview shows skipped clusters** in magenta instead of showing
+    nothing, and the guard's message now says what to do about it.
+  - `Preview: NOT DRAWN` in apply mode now reads "not drawn in apply mode".
+
+- Added `HANDOFF.md`: a working snapshot of the graph 2 rebuild - the design,
+  the confirmed Revit 2027 API facts, the bugs found, where the work stands and
+  what is next. A working note for the current effort, not a product document.
+
+- Fixed the last live run finding: **a new stand's room was never created.**
+  The cluster failed with the reason "0", which is `str(KeyError(0))` - the
+  Redraw's parameters are a dict of status and value, and the new code read
+  them like a pair. Only the six merged parameters that have a value are
+  copied now.
+
+- Fixed the fourth round of live run findings:
+  - **The QA watch was never fed.** The `List.GetItemAtIndex` that feeds the QA
+    watch had its index connected but not its list, so the watch showed
+    nothing. The Python output is now connected to it.
+  - **`Apply Updates` now defaults to false** and **`Redraw Wins On Conflicts`
+    now defaults to true**, as asked for.
+  - **`Wall.Create` wants an `ElementId` for the level**, and the component
+    level was a plain int - "No method matches given arguments for
+    Wall.Create". It is an `ElementId` now.
+  - **A cluster of stands that are all new in the Redraw had no level**,
+    because it has no stand in Main to take one from - "levelId is null". The
+    level now comes from the Redraw's level name.
+  - **A new stand is placed more carefully**: the Redraw's room point is tried
+    first and its centroid second, and a failure now says "The new stand is
+    not in an enclosed region" instead of Revit's bare message.
+  - **One Ctrl+Z now takes the preview off the plan.** In a dry run the Redraw
+    link is removed before the preview is drawn, so the preview is the last
+    transaction. The QA also says that reloading the link clears the undo
+    history from before the run.
+
+- `src/test_graph2_plan.py` grew to 17 tests, covering the shared wall guard,
+  the case where the wall between two stands is removed while one of them is
+  deleted, a stand that has no boundary left in the Redraw, the report of
+  where every stand of a skipped cluster is, and reading a stand's parameters.
+  the case where the wall between two stands is removed while one of them is
+  deleted, a stand that has no boundary left in the Redraw, and the report of
+  where every stand of a skipped cluster is.
+  and the case where the wall between two stands is removed while one of them
+  is deleted.
+
+- `src/test_graph2_plan.py` grew to 12 tests, including the reported case: a
+  separating wall removed in the Redraw with one of the two stands deleted.
+  Two more bugs came out of it - the Redraw's wall inventory could add a wall
+  twice, and a stand level conflict was not overridden by "Redraw wins".
+
+- Added `src/`, the rebuilt merge logic:
+  - `src/graph2.py` is the source of truth for the Python inside
+    `2. Compare and Update Redraw.dyn`. `src/build_graph2.py` injects it into
+    the graph and leaves the node layout alone, so the graph stays diffable.
+  - `src/merge_core.py` is the **pure Python** wall matching and clustering
+    engine — no Revit imports, so it is unit tested offline by
+    `src/test_merge_core.py` (16 tests). It covers curve distance, wall
+    matching (unchanged, moved, added, removed, one-to-one, long moves),
+    shared-wall detection and cluster grouping.
+  - Straight walls are compared by their ends, which is exact and O(1):
+    matching 2000 walls went from 6.9 s to 0.01 s.
+  - Graph 2 gained a fifth input, `Redraw Wins On Conflicts` (default false).
+- Added `tools/`, the repository's static checks. `python3 tools/check_repo.py`
+  runs them all:
+  - the `.dyn` files are valid CRLF JSON with compiling embedded Python;
+  - the generated graphs match their sources;
+  - the phase 0 probe survives its stubbed Revit models;
+  - the merge core passes its unit tests;
+  - **every Revit API call in the repository matches the Revit 2027
+    documentation**. `tools/revit_api_2027.json` is a cached index of the
+    documented API, refreshed with `python3 tools/build_api_index.py`.
+- The API audit found **four live bugs**, all of which failed silently because
+  the calls were wrapped in `except` blocks:
+  - **`WorksharingUtils.GetCentralModelPath(Document)` does not exist in Revit
+    2027.** Graph 1 used it three times. It now uses
+    `Document.GetWorksharingCentralModelPath()`. Before: `is_central()` always
+    returned False, the baseline recorded an empty `central_display_path`, and
+    workshared models silently fell back to the temp-central flow.
+  - **`Room.PhaseCreated` / `Room.PhaseDemolished` do not exist in Revit 2027.**
+    Graph 1 wrote `phase_created` and `phase_demolished` as always null. It now
+    uses `Element.CreatedPhaseId` / `Element.DemolishedPhaseId`.
+  - **`Room.IsPlaced` does not exist in Revit 2027.** Graph 1 was already
+    falling back to the location-point check; that fallback is now the code.
+  - **`ElementId.IntegerValue` was removed** in Revit 2024+. The dead fallback
+    in all three files is gone; `ElementId.Value` is used directly.
+- The phase 0 probe also used **`BuiltInCategory.OST_GenericAnnotations`**, which
+  does not exist in Revit 2027 — the category is `OST_GenericAnnotation`
+  (singular) — and **`Extrusion.Create`**, which was replaced by
+  `GeometryCreationUtilities.CreateExtrusionGeometry`.
+- Confirmed API facts from the Revit 2027 documentation and live Revit runs,
+  now recorded in `DESIGN.md`:
+  - **`Room.IsPlaced` does not exist in Revit 2027.** `SpatialElement` exposes
+    only `Area`, `Level`, `LevelId`, `Location` and `Number`.
+  - `SpatialElement.Location` is get-only; the location point is moved with
+    `Location.Move`.
+  - `Document.Create.NewRoom` takes a `UV`, not an `XYZ`. Revit **auto-numbers**
+    a new room from the sequence, so an added stand must set its Number.
+  - `XYZ` has **no `Length` property** — use `GetLength()`; its operators are
+    not dependable from PythonNet.
+  - `RevisionCloud.Create` takes the Revision id, so a revision cloud's colour
+    comes from its revision and cannot be varied per cloud.
+- Added `phase0/`, a diagnostic tool that is **not** part of the 1 → 2 workflow.
 ## 2026-11-21 — Centerline boundaries, clean names, Main-active workflow
 
 - **Graph 1 boundary extraction** now uses `SpatialElementBoundaryLocation.Center`
@@ -63,7 +508,9 @@
   (`LOCAL` / `LOCAL_DETACHED`), `redraw.is_workshared: false`,
   `redraw.detached_from_central`; `extraction_settings.merge_parameters` (the 6 merged
   parameters); `counts.unbounded_rooms`.
-- Placement status now comes from `Room.IsPlaced`; unplaced and placed-but-unbounded
+- Placement status now comes from the room's location point (`Room.IsPlaced` does
+  not exist in Revit 2027 - `SpatialElement` exposes only `Area`, `Level`,
+  `LevelId`, `Location` and `Number`); unplaced and placed-but-unbounded
   rooms are retained for audit instead of being mislabelled; `Room.Area` reads and
   boundary extraction for unplaced rooms are failure-tolerant.
 - Preflight (before any save): valid project document, directory exists, target

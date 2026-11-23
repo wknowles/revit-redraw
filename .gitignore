@@ -7,6 +7,8 @@
 *.baseline.json
 *.baseline.json.pending
 *.pending
+*.merge-log.csv
+*.merge-summary.csv
 
 # Dynamo / Revit backups
 *.dyn.bak
