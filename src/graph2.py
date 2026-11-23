@@ -1182,16 +1182,14 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues):
                 op['status']='SKIPPED'
                 op['reason']='Main and the Redraw disagree about a wall'
                 gplan.append(op);continue
-        if redraw_wins and plan['retained']:
-            # Main's own version of a wall the Redraw also changed is dropped:
-            # the Redraw wins.
-            for wall,reason in plan['retained']:plan['delete'].append(wall)
-            plan['retained']=[]
         # Business rules: the boundary must be made of walls, and only the RX
         # wall types may be rebuilt.
         guard=None
         removed_stands=[n for n in comp if statuses.get(n)=='REMOVED']
-        for wall in plan['delete']:
+        # A replacement deletes the Main wall before the Redraw's version is
+        # created, so it needs the same guard as a plain delete.
+        touched_main=list(plan['delete'])+[wall for wall,_ in plan['replace']]
+        for wall in touched_main:
             owners=wall_stands.get(wall['ref']['element_id'],set())
             staying=sorted([n for n in owners if n not in removed_stands])
             if len(staying)>1:

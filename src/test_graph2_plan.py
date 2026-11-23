@@ -349,7 +349,11 @@ def test_redraw_wins_overrides_a_conflict():
     check(len(gplan) == 1, 'the cluster should be reported, got %d' % len(gplan))
     check(gplan[0]['status'] == 'PLANNED', 'it should be planned when the Redraw wins')
     check(gplan[0]['walls_created'] == 1, "the Redraw's wall should be created")
-    check(gplan[0]['walls_deleted'] == 1, "Main's version should be deleted")
+    # Winning the conflict no longer sweeps the retained wall into the deletes:
+    # Main's wall was moved away from its baseline position, so the merge core
+    # cannot tell it apart from a wall added to Main after the Redraw was cut.
+    check(gplan[0]['_plan']['retained'],
+          'Main\'s own wall should stay retained, got %s' % gplan[0]['_plan']['retained'])
 
 
 def test_redraw_wins_still_blocks_an_unsupported_wall_type():
@@ -398,6 +402,52 @@ def test_wall_between_two_surviving_stands_blocks_the_cluster():
           'removing a wall between two surviving stands must be skipped')
     check('one region' in gplan[0]['reason'],
           'the reason should say why, got %r' % gplan[0]['reason'])
+
+
+def test_redraw_wins_keeps_a_wall_added_to_main_after_the_redraw():
+    """A Main wall that is not in the Redraw and not in the baseline was added
+    to Main after the Redraw was cut, so the designer never touched it. Winning
+    the conflict must not delete the later Main work."""
+    wall_a = Curve(0, 0, 10, 0)
+    later = Curve(0, 50, 10, 50)
+    base = {'A': stand('A', [(11, wall_a)], 1)}
+    main = {'A': stand('A', [(11, wall_a), (12, later)], 1)}
+    redraw = {'A': stand('A', [(11, Curve(0, 2, 10, 2))], 1)}   # the Redraw moved it
+    gplan, pplan, issues = plan(base, main, redraw, redraw_wins=True)
+    check(len(gplan) == 1, 'one cluster should be planned, got %d' % len(gplan))
+    check(gplan[0]['status'] == 'PLANNED', 'it should be planned, got %r'
+          % gplan[0].get('reason'))
+    check(gplan[0]['walls_deleted'] == 1,
+          'only the wall the Redraw changed should be deleted, got %d deleted'
+          % gplan[0]['walls_deleted'])
+    retained = [wall['ref']['element_id'] for wall, _ in gplan[0]['_plan']['retained']]
+    check(retained == [12],
+          'the later Main wall should stay retained, got %s' % retained)
+
+
+def test_replaced_wall_between_two_surviving_stands_blocks_the_cluster():
+    """A replacement deletes Main's wall before creating the Redraw's, so a
+    replaced wall shared by two surviving stands hits the same one-region
+    state as a plain delete."""
+    shared = Curve(10, 0, 10, 10)
+    base = {'A01': stand('A01', [(10, shared), (11, Curve(0, 0, 10, 0))], 1),
+            'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    main = {'A01': stand('A01', [(10, shared), (11, Curve(0, 0, 10, 0))], 1),
+            'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    redraw = {'A01': stand('A01', [(10, shared), (11, Curve(0, -2, 10, -2))], 1),
+              'A02': stand('A02', [(10, shared), (12, Curve(20, 0, 20, 10))], 2)}
+    # the shared wall stays where it is but the Redraw changes its type
+    for state in (main, redraw):
+        state['A01']['wall_loops'][0][0]['type'] = (
+            'Open Wall - RX' if state is redraw else 'Closed Wall - RX')
+        state['A02']['wall_loops'][0][0]['type'] = (
+            'Open Wall - RX' if state is redraw else 'Closed Wall - RX')
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(gplan[0]['status'] == 'SKIPPED',
+          'replacing a wall between two surviving stands must be skipped, got %r'
+          % gplan[0].get('status'))
+    check('one region' in gplan[0].get('reason', ''),
+          'the reason should say why, got %r' % gplan[0].get('reason'))
 
 
 def test_wall_between_a_surviving_and_a_removed_stand_is_allowed():
