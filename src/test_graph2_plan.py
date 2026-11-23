@@ -1063,6 +1063,8 @@ def test_coarse_spacing_warns_but_is_not_fatal():
           'a coarse spacing should warn once, got %s' % warnings)
     folder, tol, spacing, warnings = graph2.check_inputs('/a/folder', 0.01, 0.05)
     check(warnings == [], 'a spacing close to the tolerance should not warn, got %s' % warnings)
+    folder, tol, spacing, warnings = graph2.check_inputs('/a/folder', 0.01, 0.25)
+    check(warnings == [], 'the shipped default spacing should not warn, got %s' % warnings)
 
 
 def test_refused_room_move_raises():

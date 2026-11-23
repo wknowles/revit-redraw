@@ -339,7 +339,10 @@ def check_inputs(folder,tol,sp):
     if not math.isfinite(sp) or sp<=0:
         raise Exception('The boundary sample spacing must be a positive number of metres.')
     warnings=[]
-    if tol>0 and sp>tol*8:
+    # The shipped default is 0.25 m: do not warn on every default run, only
+    # when the operator makes the sampling coarser than that (or than the
+    # tolerance already demands).
+    if tol>0 and sp>max(tol*8,0.25):
         warnings.append('Boundary sample spacing %.3g m is much larger than the comparison '
                         'tolerance %.3g m; features shorter than the spacing may be missed.'
                         %(sp,tol))
