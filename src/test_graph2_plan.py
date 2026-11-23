@@ -26,7 +26,7 @@ REVIT_NAMES = [
     'Transaction', 'SpatialElementBoundaryOptions', 'SpatialElementBoundaryLocation', 'UnitTypeId',
     'UnitUtils', 'StorageType', 'ElementId', 'Level', 'View', 'Color', 'CurveLoop', 'DirectShape',
     'GeometryCreationUtilities', 'OverrideGraphicSettings', 'UV', 'WallType',
-    'SubTransaction', 'TransactionStatus',
+    'SubTransaction', 'TransactionStatus', 'FamilyInstance', 'Opening',
 ]
 
 
@@ -190,9 +190,10 @@ class Curve(object):
         return Projection((cx, cy, 0.0), ((point.X - cx) ** 2 + (point.Y - cy) ** 2) ** 0.5)
 
 
-def descriptor(element_id, curve, wall_type='Closed Wall - RX'):
-    return {'type': wall_type, 'type_id': 1, 'level_id': 1, 'height': 10.0,
-            'offset': 0.0, 'flipped': False, 'element_id': element_id, 'curve': curve}
+def descriptor(element_id, curve, wall_type='Closed Wall - RX', level_name='Level 1'):
+    return {'type': wall_type, 'type_id': 1, 'level_id': 1, 'level_name': level_name,
+            'height': 10.0, 'offset': 0.0, 'flipped': False, 'element_id': element_id,
+            'curve': curve}
 
 
 def stand(number, walls, element_id=None, level_name='Level 1', parameters=None):
@@ -781,6 +782,137 @@ def test_unresolved_level_skips_the_cluster_before_any_mutation():
           'a cluster with no build level should be skipped, got %r' % gplan[0]['status'])
     check('level' in gplan[0].get('reason', '').lower(),
           'the reason should mention the level, got %r' % gplan[0].get('reason'))
+
+
+def test_wall_moved_to_another_level_is_replaced():
+    """A Redraw wall on a different level is a different wall, not a kept one.
+
+    The stand also moves, so the cluster is planned: the wall that stayed put
+    changes level only, and that alone makes it a replace.
+    """
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0)), (12, Curve(0, 10, 10, 10))], 1)}
+    main = dict(base)
+    redraw = {'A': stand('A', [(11, Curve(0, 2, 10, 2)), (12, Curve(0, 10, 10, 10))], 1)}
+    redraw['A']['wall_loops'][0][1]['level_name'] = 'Level 2'
+    use_levels('Level 1', 'Level 2')
+    try:
+        gplan, pplan, issues = plan(base, main, redraw)
+    finally:
+        use_levels('Level 1')
+    check(gplan[0]['status'] == 'PLANNED',
+          'the cluster should be planned, got %r' % gplan[0].get('status'))
+    replaced = [wall['ref']['element_id'] for wall, _ in gplan[0]['_plan']['replace']]
+    kept = [wall['ref']['element_id'] for wall in gplan[0]['_plan']['keep']]
+    check(12 in replaced,
+          'the wall on another level should be replaced, got replaced=%s kept=%s'
+          % (replaced, kept))
+    check(12 not in kept, 'the wall on another level must not be kept')
+
+
+def test_level_name_missing_in_main_skips_the_cluster():
+    """A create/replace wall whose level is not in Main would fail after the
+    deletes, so the cluster is skipped in planning instead."""
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0)), (12, Curve(0, 10, 10, 10))], 1)}
+    main = dict(base)
+    redraw = {'A': stand('A', [(11, Curve(0, 2, 10, 2)), (12, Curve(0, 10, 10, 10))], 1)}
+    redraw['A']['wall_loops'][0][1]['level_name'] = 'Level 9'
+    gplan, pplan, issues = plan(base, main, redraw)
+    check(gplan[0]['status'] == 'SKIPPED',
+          'a wall level Main does not have should skip the cluster, got %r'
+          % gplan[0].get('status'))
+    check('Level not found in Main: Level 9' in gplan[0].get('reason', ''),
+          'the reason should name the missing level, got %r' % gplan[0].get('reason'))
+
+
+def test_create_wall_prefers_the_walls_own_level():
+    """A wall moved to another level is rebuilt on that level, not on the
+    cluster's level; the cluster level is only the fallback."""
+    from Autodesk.Revit.DB import WallType
+
+    class FakeDocument(object):
+        def GetElement(self, element_id):
+            return None
+
+    host = FakeDocument()
+    graph2._WALL_TYPES[id(host)] = {'Closed Wall - RX': WallType('Closed Wall - RX')}
+    graph2._LEVELS[id(host)] = [FakeLevel('Level 1', 1), FakeLevel('Level 2', 2)]
+    seen = []
+    original = graph2.Wall
+
+    class FakeWall(object):
+        def __init__(self, element_id):
+            self.Id = graph2.ElementId(element_id)
+
+        @staticmethod
+        def Create(host, curve, type_id, level_id, height, offset, flipped, structural):
+            seen.append(level_id)
+            return FakeWall(99)
+
+    graph2.Wall = FakeWall
+    try:
+        graph2.create_wall(host, graph2.ElementId(1),
+                           descriptor(21, Curve(0, 0, 10, 0), level_name='Level 2'))
+        graph2.create_wall(host, graph2.ElementId(7),
+                           descriptor(22, Curve(0, 0, 10, 0), level_name=None))
+    finally:
+        graph2.Wall = original
+        graph2._WALL_TYPES.pop(id(host), None)
+        graph2._LEVELS.pop(id(host), None)
+    check([element_id.Value for element_id in seen] == [2, 7],
+          'the wall level should win and the cluster level should be the fallback, got %s'
+          % [element_id.Value for element_id in seen])
+
+
+def test_hosted_insert_skips_the_cluster():
+    """Deleting a wall Revit cascades its doors, windows and openings, so the
+    cluster is skipped rather than silently losing them."""
+    from Autodesk.Revit.DB import WallType
+
+    class FakeCategory(object):
+        def __init__(self, name):
+            self.Name = name
+
+    class HostWall(object):
+        def GetDependentElements(self, element_ids):
+            return [graph2.ElementId(21), graph2.ElementId(22)]
+
+    class FakeInsert(graph2.FamilyInstance):
+        def __init__(self, name):
+            self.Category = FakeCategory(name)
+
+    class FakeOpening(graph2.Opening):
+        def __init__(self):
+            self.Category = FakeCategory('Openings')
+
+    elements = {21: FakeInsert('Doors'), 22: FakeOpening()}
+
+    class FakeDocument(object):
+        def GetElement(self, element_id):
+            key = element_id.Value if hasattr(element_id, 'Value') else int(element_id)
+            if key == 11:
+                return HostWall()
+            return elements.get(key)
+
+    host = FakeDocument()
+    graph2._WALL_TYPES[id(host)] = {'Closed Wall - RX': WallType('Closed Wall - RX')}
+    graph2._LEVELS[id(host)] = [FakeLevel('Level 1', 1)]
+    original = graph2.doc
+    graph2.doc = host
+    base = {'A': stand('A', [(11, Curve(0, 0, 10, 0))], 1)}
+    main = dict(base)
+    redraw = {'A': stand('A', [(11, Curve(0, 2, 10, 2))], 1)}
+    try:
+        gplan, pplan, issues = plan(base, main, redraw)
+    finally:
+        graph2.doc = original
+        graph2._WALL_TYPES.pop(id(host), None)
+        graph2._LEVELS.pop(id(host), None)
+    check(gplan[0]['status'] == 'SKIPPED',
+          'a wall with a hosted insert must not be deleted, got %r'
+          % gplan[0].get('status'))
+    reason = gplan[0].get('reason', '')
+    check('Doors' in reason and '21' in reason,
+          'the reason should name the hosted insert, got %r' % reason)
 
 
 def test_failing_cluster_rolls_back_while_the_next_one_commits():

@@ -28,7 +28,7 @@ stands merges as one change. For each cluster of stands that share walls:
   - a Main wall that already sits where a Redraw wall sits is kept;
   - a Main wall with no Redraw counterpart is deleted;
   - a Redraw wall with no Main counterpart is created;
-  - a wall whose type, height, offset or flip changed is rebuilt;
+  - a wall whose type, height, offset, flip or level changed is rebuilt;
   - a wall added to Main after the Redraw was cut is left alone.
 
 Stands the Redraw added are created, stands it deleted are deleted, and stands
@@ -45,7 +45,8 @@ from Autodesk.Revit.DB import (Arc, Line, XYZ, Wall, LocationCurve, LocationPoin
  BuiltInCategory, FilteredElementCollector, LinkElementId, FilePath, OpenOptions,
  Transaction, SubTransaction, TransactionStatus, SpatialElementBoundaryOptions,
  SpatialElementBoundaryLocation, UnitTypeId, UnitUtils, StorageType, ElementId, Level, View,
- Color, CurveLoop, DirectShape, GeometryCreationUtilities, OverrideGraphicSettings, UV)
+ Color, CurveLoop, DirectShape, GeometryCreationUtilities, OverrideGraphicSettings, UV,
+ FamilyInstance, Opening)
 from RevitServices.Persistence import DocumentManager
 
 doc=DocumentManager.Instance.CurrentDBDocument
@@ -134,7 +135,13 @@ def wall_desc(d, seg):
         except: pass
         try: offset=e.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET).AsDouble()
         except: pass
+        level_name=None
+        try:
+            level=d.GetElement(e.LevelId)
+            level_name=level.Name if level else None
+        except: pass
         return {'type':wt.Name if wt else None,'type_id':eidv(e.GetTypeId()),'level_id':eidv(e.LevelId),
+                'level_name':level_name,
                 'height':height,'offset':offset,'flipped':bool(e.Flipped),'element_id':eidv(e.Id),
                 'curve':lc.Curve if isinstance(lc,LocationCurve) else seg.GetCurve()}
     except:return None
@@ -646,8 +653,9 @@ def wall_points(curve):
 
 def wall_attributes(wd):
     """What makes a wall a different wall rather than a different position:
-    type, height, offset and flip."""
-    return (wd.get('type'), wd.get('height'), wd.get('offset'), bool(wd.get('flipped')))
+    type, height, offset, flip and level."""
+    return (wd.get('type'), wd.get('height'), wd.get('offset'),
+            bool(wd.get('flipped')), wd.get('level_name'))
 
 
 def wall_records(descriptors):
@@ -715,8 +723,15 @@ def collect_walls(doc, tr=None):
                 offset = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET).AsDouble()
             except Exception:
                 pass
+            level_name = None
+            try:
+                level = doc.GetElement(wall.LevelId)
+                level_name = level.Name if level else None
+            except Exception:
+                pass
             out[eidv(wall.Id)] = {'type': type_name, 'type_id': None,
-                                  'level_id': eidv(wall.LevelId), 'height': height,
+                                  'level_id': eidv(wall.LevelId), 'level_name': level_name,
+                                  'height': height,
                                   'offset': offset, 'flipped': bool(wall.Flipped),
                                   'element_id': eidv(wall.Id), 'curve': curve}
         except Exception:
@@ -853,12 +868,57 @@ def find_level_by_name(host, name):
     return None
 
 
+def hosted_dependents(host, wall_id):
+    """The elements a wall hosts that deleting it would destroy.
+
+    Only hosted inserts and openings count: they are the ones Revit cascades
+    with the wall, and the merge has no way to put them back.
+    """
+    try:
+        key = wall_id if isinstance(wall_id, ElementId) else ElementId(int(wall_id))
+        wall = host.GetElement(key)
+    except Exception:
+        return []
+    if wall is None:
+        return []
+    try:
+        ids = wall.GetDependentElements(None)
+    except Exception:
+        return []
+    out = []
+    for element_id in ids or []:
+        try:
+            element = host.GetElement(element_id)
+        except Exception:
+            continue
+        if not isinstance(element, (FamilyInstance, Opening)):
+            continue
+        try:
+            name = element.Category.Name if element.Category else None
+        except Exception:
+            name = None
+        try:
+            key = eidv(element_id)
+        except Exception:
+            key = int(element_id)
+        out.append((key, name or type(element).__name__))
+    return out
+
+
 def create_wall(host, level_id, wd):
-    """Create one wall in Main from a Redraw wall description."""
+    """Create one wall in Main from a Redraw wall description.
+
+    The wall's own level wins: a Redraw wall moved to another level is rebuilt
+    on that level, not on the cluster's. The cluster level is only the fallback
+    for a wall whose level name could not be read.
+    """
     types = wall_types(host)
     wall_type = types.get(wd['type'])
     if wall_type is None:
         raise Exception('Wall type not found in Main: ' + str(wd['type']))
+    level = find_level_by_name(host, wd.get('level_name'))
+    if level is not None:
+        level_id = level.Id
     if level_id is None:
         raise Exception('No level to build the wall on')
     if not isinstance(level_id, ElementId):
@@ -1287,10 +1347,7 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
             op['status']='SKIPPED';op['reason']=reason
             gplan.append(op);continue
         blocked=None
-        for n in affected:
-            reason=level_mismatch(b.get(n),m.get(n),r.get(n))
-            if reason:blocked=reason;break
-        if blocked is None and conflicted and not redraw_wins:
+        if conflicted and not redraw_wins:
             blocked='Main and the Redraw changed this cluster differently'
         if blocked is not None:
             op['status']='SKIPPED';op['reason']=blocked
@@ -1308,6 +1365,18 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
                                'reason':'Main and the Redraw changed this stand differently; the Redraw wins'})
                 if n not in affected:affected.append(n)
             op['affected']=affected
+        # The level gate runs after the Redraw-wins handling, so a stand that
+        # won its conflict is checked like any other.
+        blocked=None
+        for n in affected:
+            reason=level_mismatch(b.get(n),m.get(n),r.get(n))
+            if reason:blocked=reason;break
+        if blocked is not None:
+            op['status']='SKIPPED';op['reason']=blocked
+            for n in comp:
+                qa.append('CLUSTER %s stand %s: baseline=%s | Main=%s | Redraw=%s'
+                          %(cid,n,where(b.get(n)),where(m.get(n)),where(r.get(n))))
+            gplan.append(op);continue
         mw={};rw={};bw=[]
         # Every stand of the cluster contributes its walls, not just the affected
         # ones. A wall shared with an unchanged neighbour already exists in Main,
@@ -1402,6 +1471,24 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
                 if name not in types:
                     guard=('Wall type not found in Main: %s. Create that wall type in Main, '
                            'or use a wall type Main already has.'%name)
+                    break
+        if guard is None:
+            for wall in plan['create']+[w for _,w in plan['replace']]:
+                name=wall['ref'].get('level_name')
+                if name and find_level_by_name(doc,name) is None:
+                    guard=('Level not found in Main: %s. Create that level in Main, or put '
+                           'the stand on a level Main already has.'%name)
+                    break
+        if guard is None:
+            for wall in touched_main:
+                hosted=hosted_dependents(doc,wall['ref']['element_id'])
+                if hosted:
+                    guard=('Main wall %s hosts %s. This stand\'s walls host '
+                           'doors/windows/openings; remove them in the Redraw or handle '
+                           'them by hand.'
+                           %(wall['ref']['element_id'],
+                             ', '.join('%s element %s'%(category,element_id)
+                                       for element_id,category in hosted)))
                     break
         level=component_level(affected,m,r,doc)
         if guard is None and (level is None or eidv(level)<=0):
