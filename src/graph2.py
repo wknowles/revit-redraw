@@ -1682,14 +1682,20 @@ def sold_check(m,r,gplan,tol):
 
     Returns (blockers, warnings, checked). Each entry is (cluster, number,
     reason). A blocker is something the run must not apply; a warning is
-    reported and does not stop the merge. Only clusters the planner will
-    actually apply are examined: a cluster that is skipped for another reason
-    changes nothing, so a sold stand in it cannot be resized by this run.
+    reported and does not stop the merge.
+
+    Every stand in a cluster the planner will apply is examined, not only the
+    cluster's `affected` stands. The plan reconciles every wall of the
+    component, so a stand it did not classify as changed can still be rebuilt -
+    a sold neighbour, or a stand Main edited after the Redraw was cut, whose
+    area the Redraw would otherwise push back. Only clusters that will not be
+    applied are skipped: a cluster blocked for another reason changes nothing,
+    so a sold stand in it cannot be resized by this run.
     """
     blockers=[];warnings=[];checked=set()
     for op in gplan:
         if op.get('status')!='PLANNED':continue
-        for number in list(op.get('affected') or []):
+        for number in list(op.get('stands') or op.get('affected') or []):
             main=m.get(number)
             if main is None:continue
             if main.get('status')!=SOLD_ONLY:continue

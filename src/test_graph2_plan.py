@@ -1549,6 +1549,32 @@ def test_sold_warnings_make_the_run_warn():
           'a sold-shape warning should not read as SUCCESS, got %r' % status)
     check('shape' in message, 'the summary should carry the reason, got %r' % message)
 
+
+
+def test_a_sold_neighbour_is_checked_even_when_its_own_change_is_not_the_reason():
+    """The cluster reconciles every wall in the component, including a stand it
+    did not classify as AFFECTED. A sold stand whose Main geometry differs from
+    the Redraw is resized by that rebuild, so the stale Redraw must not push
+    Main's newer area back."""
+    base = {'S01': as_sold(square('S01'), 9.0),
+            'N01': stand('N01', [(2, Curve(3, 0, 3, 3)), (5, Curve(8, 0, 8, 3)),
+                                 (6, Curve(3, 3, 8, 3)), (7, Curve(3, 0, 8, 0))], 5)}
+    main = {'S01': as_sold(square('S01', x=-1.0), 12.0), 'N01': base['N01']}
+    redraw = {'S01': as_sold(square('S01'), 9.0),
+              'N01': stand('N01', [(2, Curve(3, 0, 3, 3)), (5, Curve(9, 0, 9, 3)),
+                                   (6, Curve(3, 3, 9, 3)), (7, Curve(3, 0, 9, 0))], 5)}
+    gplan, pplan, issues = plan(base, main, redraw, redraw_wins=True)
+    check(gplan and gplan[0]['status'] == 'PLANNED',
+          'the neighbour change should plan the cluster, got %r'
+          % [(op['status'], op.get('change')) for op in gplan])
+    check(gplan and 'S01' not in gplan[0]['affected'] and 'S01' in gplan[0]['stands'],
+          'the sold stand must be in the cluster but not in affected: affected=%r'
+          % (gplan[0]['affected'] if gplan else None,))
+    blockers, warnings, checked = graph2.sold_check(main, redraw, gplan, 0.001)
+    check(len(blockers) == 1,
+          'a sold stand the rebuild would resize must block, got %r' % (blockers,))
+    check('S01' in checked, 'the sold neighbour must be recorded as checked')
+
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]

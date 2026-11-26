@@ -232,8 +232,11 @@ deletes it when the model is saved and re-imports it about two minutes later.
 - `status_present(m)` is a document-wide check: the parameter is on every Room or
   none. If it is absent, a preview reports `SOLD STATUS UNAVAILABLE` in `issues`
   and the Summary, and an apply raises `Refused` with the wait-and-rerun message.
-- `sold_check` examines only clusters the planner would apply, so a sold stand in
-  a cluster skipped for another reason cannot block the run. Per sold stand:
+- `sold_check` examines every stand in a cluster the planner would apply - not only
+  the cluster's `affected` stands, because the plan reconciles every wall of the
+  component, so a sold *neighbour* of a moved stand, or a sold stand Main edited
+  after the Redraw was cut, is rebuilt too. A cluster skipped for another reason
+  changes nothing, so a sold stand in it cannot block the run. Per sold stand:
   - the Redraw deletes it -> blocker, because the area would go to zero;
   - the Redraw's area differs from Main's by more than
     `area_allowance = max(0.001 m2, perimeter x tolerance)` -> blocker;

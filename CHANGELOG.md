@@ -32,6 +32,12 @@
   wall is replaced. Straight walls compare by endpoints, so this costs nothing;
   curved walls match through 17 sampled points per curve and are documented as
   coarser, with the unchanged arc still matching exactly.
+- **The sold check covers the whole cluster, not just its changed stands.** The plan
+  reconciles every wall of the component, so a sold stand it did not classify as
+  `AFFECTED` can still be rebuilt: a sold *neighbour* of a stand that moved, or a
+  stand Main edited after the Redraw was cut, whose stale Redraw geometry would
+  otherwise be pushed back over Main's newer area. `sold_check` now walks
+  `stands` rather than `affected`, and a test proves the neighbour case blocks.
 - `DESIGN.md` gains a "Sold stands" section and the tolerance rationale;
   `AGENTS.md`, `ROADMAP.md` (checklist plus two new limitations), the user guide
   (new section 8.5, section 9.1.1, `REFUSED` status, five new error rows) and
