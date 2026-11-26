@@ -11,6 +11,12 @@
 - `AGENTS.md`: added `BUSINESS_PROCESS.md` to the supporting docs list, with the rule
   that it changes in the same commit as any behaviour that alters the process it
   describes.
+- `BUSINESS_PROCESS.md` refreshed against the rebuilt merge graph (v0.2): shared-wall
+  clusters and added/removed stands are described as live, the `Apply Updates` and
+  `Redraw Wins On Conflicts` defaults are documented, the one-step-undo and
+  no-partial-merge claims are corrected, the run-summary counts are described as
+  per-cluster, and the sold-stand rules move from live to not built. §7 gains a
+  "Checked by the tool" column and §10 gains a real state per requirement.
 
 ## 2026-11-23 — In-Revit validation recorded; parameter docs aligned; process diagram
 
