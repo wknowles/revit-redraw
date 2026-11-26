@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-11-26 — Sold stands refuse the run, and walls merge exactly as drawn
+
+- **A sold stand can no longer be resized by a merge.** `Status` is read from Main
+  (the Redraw has no such parameter) and normalised, so only `Sold` blocks and
+  `OnHold`/`Available`/blank do not. `sold_check` examines the clusters the planner
+  would actually apply: a sold stand the Redraw resizes, or deletes, raises a new
+  `Refused` exception before the merge transaction opens, so nothing is written.
+  The Summary status is `REFUSED`, the message names every stand and points at the
+  Redraw or the CRM, and the audit log gets one `REFUSED` row with no traceback.
+  A dry run cannot write, so it marks the blocked clusters `SKIPPED` instead, which
+  also draws them magenta.
+- **A sold stand that keeps its area but changes shape warns.** `SOLD STAND
+  DIMENSIONS` in the issues makes the run `SUCCESS WITH WARNINGS` without blocking.
+  The area allowance is derived — `max(0.001 m2, perimeter x tolerance)` — because a
+  rebuild that keeps a wall within the tolerance can legitimately move the area by
+  about that much.
+- **The merged area is verified before the commit.** Inside the merge transaction,
+  after `doc.Regenerate()`, every checked sold stand's live `Room.Area` is compared
+  with the Redraw's; any drift rolls the whole merge back and refuses. The summary
+  gains `Sold status`, `Sold stand blocks` and `Sold stand warnings`.
+- **A missing `Status` is a refusal, not a silent pass.** The CRM plugin deletes the
+  parameter on save and re-imports it about two minutes later. An apply inside that
+  window is refused with a wait-and-rerun message; a preview reports
+  `SOLD STATUS UNAVAILABLE`.
+- **The tolerance drops from 10 mm to 0.5 mm**, in the graph's saved slider and in
+  the code fallback. The tolerance never limited how closely a rebuilt wall follows
+  the drawing — a created or replaced wall is built from the Redraw's own `Curve`.
+  It decides whether an existing Main wall counts as the same wall. At 10 mm a wall
+  9 mm out stayed in Main's position and moved the stand's area; at 0.5 mm a touched
+  wall is replaced. Straight walls compare by endpoints, so this costs nothing;
+  curved walls match through 17 sampled points per curve and are documented as
+  coarser, with the unchanged arc still matching exactly.
+- `DESIGN.md` gains a "Sold stands" section and the tolerance rationale;
+  `AGENTS.md`, `ROADMAP.md` (checklist plus two new limitations), the user guide
+  (new section 8.5, section 9.1.1, `REFUSED` status, five new error rows) and
+  `BUSINESS_PROCESS.md` (v0.3) follow.
+
 ## 2026-11-26 — Business process document
 
 - Added `BUSINESS_PROCESS.md`: business-facing overview of the Redraw workflow, written

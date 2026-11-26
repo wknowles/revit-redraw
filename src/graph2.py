@@ -3,7 +3,7 @@
 Revit 2027 | Dynamo 4.0.2 | CPython3/PythonNet3
 
 IN[0] Redraw directory
-IN[1] comparison tolerance metres, optional, default 0.01
+IN[1] comparison tolerance metres, optional, default 0.0005
 IN[2] boundary sample spacing metres, optional, default 0.25
 IN[3] APPLY UPDATES boolean, optional, default False
 IN[4] REDRAW WINS ON CONFLICTS boolean, optional, default False
@@ -38,6 +38,19 @@ Scope is deliberately controlled:
 - only the Closed Wall - RX and Open Wall - RX wall types may be rebuilt
 - a boundary that is not made of walls is skipped (Room Separation Lines)
 - level mismatches and conflicts are skipped, unless the Redraw wins flag is set
+- a sold stand whose area the merge would change refuses the whole run
+
+On the tolerance. It does not limit how closely a rebuilt wall follows the
+drawing: a created or replaced wall is built from the Redraw's own Curve object,
+so it is exact. The tolerance decides only whether an existing Main wall counts
+as "already the same wall" (kept where Main has it) or is replaced, and whether
+Main's wall counts as unchanged since the Redraw was cut. Untouched walls are
+bit-identical - the Redraw is a copy - so the tolerance only has to separate
+identical walls from edited ones. It ships at 0.5 mm for that reason: at the old
+10 mm a wall 9 mm out was kept in Main's position, which moved the area.
+Curved walls are matched through sampled points (17 per curve) instead of exact
+endpoints, so their resolution is coarser, but an unchanged arc still matches
+exactly because both sides sample the same geometry.
 """
 import clr, os, json, math, re, time, uuid
 clr.AddReference('RevitAPI'); clr.AddReference('RevitServices')
@@ -53,6 +66,25 @@ doc=DocumentManager.Instance.CurrentDBDocument
 PARAMS=['Floorplan Hall','Floorplan Pavilion','Floorplan Sector',
         'Obstruction Area','Product Code','Custom Area']
 RX_TYPES=('Closed Wall - RX','Open Wall - RX')
+# The CRM plugin owns the sold status. It is a Room parameter in Main and it is
+# deliberately absent from the Redraw: it is deleted when the model is saved and
+# re-imported about two minutes later, so a run made straight after a save can
+# find it gone. Only "sold" blocks; anything else (OnHold, Available, a blank)
+# does not.
+SOLD_PARAM='Status'
+SOLD_ONLY='sold'
+# The smallest area drift treated as a change, and the floor of the derived
+# allowance. A rebuild that keeps a wall within the tolerance can move the area
+# by about perimeter x tolerance, so the allowance is derived, not guessed.
+AREA_FLOOR_M2=0.001
+
+class Refused(Exception):
+    """A business rule refused the run.
+
+    Not a crash, so the summary says REFUSED and no traceback is shown: the
+    operator has a modelling or timing decision to make, not a bug to report.
+    """
+
 try:
     # Standalone, the merge core is a module. Inside the Dynamo graph the
     # generator inlines merge_core.py instead, so there is nothing to import.
@@ -146,6 +178,29 @@ def wall_desc(d, seg):
                 'curve':lc.Curve if isinstance(lc,LocationCurve) else seg.GetCurve()}
     except:return None
 
+def text_param(room,name):
+    """One parameter as text, or None when it is not there.
+
+    None means the parameter is absent from the Room, which is how a missing
+    Status is told apart from a blank one.
+    """
+    p=room.LookupParameter(name)
+    if p is None:return None
+    try:
+        if not p.HasValue:return ''
+    except Exception:pass
+    try:
+        v=p.AsString()
+        if v is None:v=p.AsValueString()
+        return '' if v is None else v
+    except Exception:return ''
+
+def status_of(room):
+    """The sold status of a Room, normalised, or None when there is no Status."""
+    raw=text_param(room,SOLD_PARAM)
+    if raw is None:return None
+    return ''.join(ch for ch in raw.strip().casefold() if ch not in ' _-')
+
 def pvals(room):
     out={}
     for n in PARAMS:
@@ -175,7 +230,8 @@ def state(room,tr=None,d=None,boundary_location='Finish',wall_cache=None):
     except Exception: area=0.0
     base={'number':(room.Number or '').strip(),'room':room,'element_id':eidv(room.Id),
           'parameters':pvals(room),'level_id':eidv(room.LevelId),'level_name':level_name,
-          'area':area,'loops':[],'boundary_ids':[],'wall_loops':[],'room_point':None}
+          'area':area,'loops':[],'boundary_ids':[],'wall_loops':[],'room_point':None,
+          'status':status_of(room)}
     if segloops is None or len(segloops)==0:
         base.update({'placement_status':'NOT_PLACED','has_geometry':False,'centroid':None,'room_point':rp});return base
     loops=[];ids=[]
@@ -1585,6 +1641,110 @@ def plan_clusters(b, m, r, r_walls, tol, sp, redraw_wins, qa, issues, protected=
 
 PRIVATE_KEYS=('_plan','_rooms','_level','_want','_target')
 
+# --------------------------------------------------------------------------
+# sold stands
+# --------------------------------------------------------------------------
+
+
+def perimeter_of(state):
+    """The length of a stand's boundary, in internal feet."""
+    total=0.0
+    for loop in state.get('loops') or []:
+        for curve in loop:
+            try:total+=float(curve.Length)
+            except Exception:pass
+    return total
+
+def area_allowance(perimeter,tol):
+    """The area drift a merge may leave on a stand it does not resize.
+
+    A wall that is kept because it is already within the tolerance sits where
+    Main has it, so the rebuilt boundary can be off by about the perimeter
+    times the tolerance. Anything larger than that is a real resize.
+    """
+    floor=UnitUtils.ConvertToInternalUnits(AREA_FLOOR_M2,UnitTypeId.SquareMeters)
+    return max(floor,perimeter*tol)
+
+def status_present(m):
+    """Whether Main carries the Status parameter at all.
+
+    It is a project parameter, so it is on every Room or on none. The CRM
+    plugin deletes it on save and re-imports it about two minutes later, so a
+    run made straight after a save finds it gone: that is a timing problem to
+    report, not a reason to merge blind.
+    """
+    for state in m.values():
+        if state.get('status') is not None:return True
+    return False
+
+def sold_check(m,r,gplan,tol):
+    """Sold stands the merge would resize, and sold stands it would reshape.
+
+    Returns (blockers, warnings, checked). Each entry is (cluster, number,
+    reason). A blocker is something the run must not apply; a warning is
+    reported and does not stop the merge. Only clusters the planner will
+    actually apply are examined: a cluster that is skipped for another reason
+    changes nothing, so a sold stand in it cannot be resized by this run.
+    """
+    blockers=[];warnings=[];checked=set()
+    for op in gplan:
+        if op.get('status')!='PLANNED':continue
+        for number in list(op.get('affected') or []):
+            main=m.get(number)
+            if main is None:continue
+            if main.get('status')!=SOLD_ONLY:continue
+            checked.add(number)
+            redraw=r.get(number)
+            if redraw is None:
+                blockers.append((op['cluster'],number,
+                                 'the Redraw deletes a sold stand, so its area would go to zero'))
+                continue
+            perimeter=perimeter_of(main)
+            allowance=area_allowance(perimeter,tol)
+            moved_area=abs((main.get('area') or 0.0)-(redraw.get('area') or 0.0))
+            if moved_area>allowance:
+                blockers.append((op['cluster'],number,
+                                 'sold stand area would change: %.3f -> %.3f sqft (allowed %.3f)'
+                                 %(main.get('area') or 0.0,redraw.get('area') or 0.0,allowance)))
+                continue
+            redraw_perimeter=perimeter_of(redraw)
+            if abs(perimeter-redraw_perimeter)>allowance:
+                warnings.append((op['cluster'],number,
+                                 'sold stand keeps its area but changes shape: perimeter %.1f -> '
+                                 '%.1f ft'%(perimeter,redraw_perimeter)))
+    return blockers,warnings,checked
+
+def sold_message(blockers):
+    """The refusal text: what the rule is, which stands, and what to do."""
+    found=sorted(set((str(n),str(reason)) for _,n,reason in blockers))
+    return ('A sold stand must not be resized by the Redraw, so nothing was merged. '
+            'Stand(s): %s. %s Fix the Redraw so each sold stand keeps its area, or get a '
+            'commercial decision recorded in the CRM, then run again.'
+            %(', '.join(n for n,_ in found),'; '.join(reason for _,reason in found)+'.'))
+
+def merge_sold_drift(m,r,checked):
+    """Sold stands whose area moved after the merge was applied, in Main.
+
+    The prediction before the merge is the gate; this is the same question
+    asked of the document that is about to be committed. A Room that has gone
+    counts as drift, because its area has gone with it.
+    """
+    drift=[]
+    for number in sorted(checked):
+        state=m.get(number);redraw=r.get(number)
+        if state is None or redraw is None:continue
+        try:after=float(state['room'].Area)
+        except Exception:
+            drift.append((None,number,'the sold stand has no area after the merge'))
+            continue
+        want=float(redraw.get('area') or 0.0)
+        allowance=area_allowance(perimeter_of(state),0.0)
+        if abs(after-want)>allowance:
+            drift.append((None,number,'acknowledged area %.3f sqft, merged area %.3f sqft'
+                          %(want,after)))
+    return drift
+
+
 
 def public_plan(entries):
     """The plan entries as the watches and the audit should see them.
@@ -1611,18 +1771,19 @@ def judge_run(pout, gout, issues):
     failed=sum(1 for x in pout+gout if x['status'] in ('FAILED','VERIFY_FAILED'))
     skipped=[x for x in pout+gout if x['status']=='SKIPPED']
     conflicts=[x for x in issues if 'CONFLICT' in x.get('type','')]
+    sold=[x for x in issues if str(x.get('type','')).startswith('SOLD ')]
     if failed:
         status='COMPLETED WITH ERRORS'
-    elif skipped or conflicts:
+    elif skipped or conflicts or sold:
         status='SUCCESS WITH WARNINGS'
     else:
         status='SUCCESS'
-    reasons=[x.get('reason') for x in skipped+conflicts if x.get('reason')]
+    reasons=[x.get('reason') for x in skipped+conflicts+sold if x.get('reason')]
     if failed:
         message='%d change(s) failed; see QA'%failed
     elif reasons:
         message=reasons[0]
-    elif skipped or conflicts:
+    elif skipped or conflicts or sold:
         message='%d cluster(s) skipped, %d conflict(s)'%(len(skipped),len(conflicts))
     else:
         message='Nothing was blocked'
@@ -1736,7 +1897,7 @@ def timing_note():
 
 try:
     if doc is None:raise Exception('No active Main document')
-    folder,tol_m,sp_m,notes=check_inputs(pv(iv(0)),iv(1,.01),iv(2,.25))
+    folder,tol_m,sp_m,notes=check_inputs(pv(iv(0)),iv(1,.0005),iv(2,.25))
     qa.extend(notes)
     apply=bool(iv(3,False));redraw_wins=bool(iv(4,False))
     rvt,side=files(os.path.abspath(folder))
@@ -1769,6 +1930,38 @@ try:
     redraw_all=wall_records(list(collect_walls(rdoc,None).values()));mark('Redraw wall scan')
     gplan,pplan=plan_clusters(b,m,r,redraw_all,tol,sp,redraw_wins,qa,issues,
                               protected,duplicates);mark('plan')
+
+    # ---- sold stands ----
+    # Status lives in Main only: the CRM plugin owns it and the Redraw has no
+    # such parameter. It is deleted when the model is saved and re-imported a
+    # couple of minutes later, so its absence is a timing problem to report,
+    # never a licence to merge blind.
+    if not status_present(m):
+        message=('The Status parameter is not present in Main, so sold stands cannot be '
+                 'checked. The CRM plugin removes it when the model is saved and re-imports '
+                 'it about two minutes later. Wait for the import, then run again.')
+        qa.append('SOLD STATUS: '+message)
+        issues.append({'stand':None,'type':'SOLD STATUS UNAVAILABLE','reason':message})
+        if apply:raise Refused(message)
+    blockers,warnings,checked=sold_check(m,r,gplan,tol)
+    for cluster,number,reason in warnings:
+        qa.append('SOLD STAND %s: %s'%(number,reason))
+        issues.append({'stand':number,'cluster':cluster,'type':'SOLD STAND DIMENSIONS',
+                       'reason':reason})
+    for cluster,number,reason in blockers:
+        qa.append('SOLD STAND %s: %s'%(number,reason))
+        issues.append({'stand':number,'cluster':cluster,'type':'SOLD STAND AREA','reason':reason})
+    if blockers:
+        if apply:raise Refused(sold_message(blockers))
+        # A dry run writes nothing, so show which clusters an apply would refuse
+        # instead of drawing a preview of walls that can never land.
+        blocked=set(cluster for cluster,_,_ in blockers)
+        for op in gplan:
+            if op.get('cluster') in blocked and op.get('status')=='PLANNED':
+                op['status']='SKIPPED'
+                op['reason']=('SOLD STAND: the merge would resize a sold stand, so an '
+                              'apply would refuse the whole run')
+    mark('sold check')
     # The tag types and views the model already uses, read before anything is
     # merged so a new stand's tags match what is there now.
     tag_templates=room_tag_templates(doc)
@@ -1878,6 +2071,13 @@ try:
                 else:
                     try:op['status']='APPLIED' if p.Set(op['_target']) else 'FAILED'
                     except Exception as e:op['status']='FAILED';op['reason']=str(e)
+            # The prediction before the merge is the gate. This asks the same
+            # question of the document that is about to be committed: if a sold
+            # stand's area moved anyway, the whole merge goes back.
+            if checked:
+                doc.Regenerate()
+                drift=merge_sold_drift(m,r,checked)
+                if drift:raise Refused(sold_message(drift))
             committed=tx.Commit()
             if committed!=TransactionStatus.Committed:
                 raise Exception('Merge transaction did not commit: '+str(committed))
@@ -1940,6 +2140,9 @@ try:
              'Skipped':skipped,
              'Errors':hard_fail,
              'Conflicts':conflicts,
+             'Sold status':'PRESENT' if (m and status_present(m)) else 'MISSING',
+             'Sold stand blocks':sum(1 for x in issues if x.get('type')=='SOLD STAND AREA'),
+             'Sold stand warnings':sum(1 for x in issues if x.get('type')=='SOLD STAND DIMENSIONS'),
              'Redraw document closed':'YES' if rdoc_closed else 'NO',
              'Preview':preview_note if preview_note else ('not drawn in apply mode'
                                                           if apply else 'NOT DRAWN'),
@@ -1949,9 +2152,13 @@ except Exception as e:
     # Put the reason in the summary as well as the QA list: the summary is the
     # watch that is always visible.
     import traceback
-    detail=traceback.format_exc()
-    qa.append('FATAL: '+str(e));qa.append(detail)
-    summary['Status']='FAILED';summary['Error']=str(e);summary['Trace']=detail
+    refused=isinstance(e,Refused)
+    detail='' if refused else traceback.format_exc()
+    qa.append(('REFUSED: ' if refused else 'FATAL: ')+str(e))
+    if detail:qa.append(detail)
+    summary['Status']='REFUSED' if refused else 'FAILED'
+    summary['Message']=str(e);summary['Error']=str(e)
+    if detail:summary['Trace']=detail
     # A failed run still leaves a record behind, or the audit trail would read
     # as if the run never happened. Nothing here may raise: the original
     # exception is what the operator needs to see.
@@ -1963,7 +2170,7 @@ except Exception as e:
     if path is None:
         summary['Audit']='SKIPPED'
     else:
-        failure=[['','','NONE','RUN FAILED',0,0,0,0,0,str(e)]]
+        failure=[['','','NONE','REFUSED' if refused else 'RUN FAILED',0,0,0,0,0,str(e)]]
         try:
             ok,audit_error=write_audit(path,name,failure,audit_totals([],[],issues),
                                        'APPLIED' if apply else 'PREVIEW',

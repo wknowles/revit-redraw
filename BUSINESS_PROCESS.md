@@ -71,20 +71,22 @@ flowchart TD
 
 **7. Save and publish.** The designer saves the live plan and pushes it to Autodesk Forma. The redraw, and the run's log and summary files, are then archived.
 
-### A sold stand must stop the whole redraw update *(Design not started)*
+### A sold stand stops the whole redraw update *(Live)*
 
-> **Not yet in the tool.** Nothing reads sold status today, so an applied merge will **not** stop and will **not** name the stand. The designer has to spot this by eye during design review (§8). The rest of this section is the intended behaviour, and §10 T1–T3 and T9 are the requirements that deliver it.
+A stand that has been sold must not be resized by the designer. If the redraw would change a sold stand's area — including because a neighbouring stand's shared wall moves — **the entire redraw update is refused.** It is not a per-stand skip, and no part of the redraw is merged.
 
-A stand that has been sold must not be resized by the designer. If the redraw would change a sold stand's area — including because a neighbouring stand's shared wall moves — **the entire redraw update must fail.** It should not be a per-stand skip, and no part of the redraw should merge.
+The tool raises an error that names the stand or stands involved, states that their area would change, and explains that a sold stand cannot be resized by the designer. Nothing is written to the live plan. In the outputs this appears as the status **REFUSED**, and the attempt is recorded in the run log.
 
-The tool must raise an error that names the stand or stands involved, state that their area would change, and explain that a sold stand cannot be resized by the designer. Nothing may be written to the live plan when that happens.
+A sold stand that keeps its area but changes shape is allowed. The run warns instead, and the warning names the stand.
+
+The tool reads the sold status from the live plan. It needs the `Status` parameter to be present, and the CRM plugin removes that parameter each time the model is saved and restores it about two minutes later. A run made inside that window is refused with a message that says to wait. This is deliberate: a merge that cannot see which stands are sold must not be allowed to resize one.
 
 The designer then opens the **Redraw model** and fixes the design. There are two routes:
 
 - **Change the design** so the sold stand's area is preserved — for example by moving the shared wall, relocating the stand on the same footprint, or adjusting the neighbouring stand to suit.
 - **Obtain a commercial decision through the CRM** authorising the resize. The CRM-linked plugin updates the stand's parameter on the live plan, and the designer is notified to update the stand with the new dimensions in the redraw. The redraw is then re-run.
 
-Because the round fails as a whole, this is expensive to discover late. The sold status is visible on the live plan, so the designer should check it during step 2, before investing in review cycles with internal teams and customers. This is one of the reasons the planning run in step 5 exists — it is the cheapest place to find out that a redraw cannot merge.
+Because the round fails as a whole, this is expensive to discover late. The sold status is visible on the live plan, so the designer should check it during step 2, before investing in review cycles with internal teams and customers. This is one of the reasons the planning run in step 5 exists — it is the cheapest place to find out that a redraw cannot merge, and it reports which sold stands block it without writing anything.
 
 ## 4. How the merge decides what to apply *(Live)*
 
@@ -115,7 +117,7 @@ The consequences in practice:
 - **A blocked geometry change does not block the stand's details.** Where a cluster is skipped or fails, the stand details that only the redraw changed — hall, pavilion, sector, obstruction area, product code, custom area — are still written. The one exception is a duplicated room number, whose details are not updated.
 - **Stand details are judged one at a time.** A detail that only changed in the redraw is updated; a detail that changed in both places is flagged.
 
-The comparison also has a tolerance: differences below one centimetre are treated as no difference at all, so a stand is only considered moved or resized if the change is real.
+The comparison also has a tolerance: differences below half a millimetre are treated as no difference at all, so a stand is only considered moved or resized if the change is real. The tool uses a tolerance this small because it does not redraw the stand — it rebuilds the walls it must change from the redraw's own geometry, which is exact. The tolerance only decides whether an existing wall in the live plan counts as already being where the redraw wants it. With a coarse tolerance a wall that was slightly out of position was kept, which moved the stand's area.
 
 So the merge is a careful, selective application of the approved redraw — not the redraw's contents pasted over the live plan.
 
@@ -159,10 +161,11 @@ These rules bind the process. The last column says whether the current tool chec
 
 | Rule | Detail | Checked by the tool |
 |---|---|---|
-| **Sold stands are not resized by the designer** | A stand that has been sold may be relocated, but not resized. The designer does not decide to change what a customer has bought. | **No** — it is a human rule today |
-| **One sold stand stops the whole redraw update** | If the redraw would change the area of any sold stand, the entire update must fail with an explanatory error. The designer opens the Redraw model and fixes the design, then re-runs. | **No** — see §8 |
-| **Area changes on a sold stand need approval** | Where a stand's area changes and the stand is sold, customer or commercial approval is required before the merge is actioned. Unsold stands do not require this. | **No** — a commercial process, outside the tool |
+| **Sold stands are not resized by the designer** | A stand that has been sold may be relocated, but not resized. The designer does not decide to change what a customer has bought. | **Yes** — the merge refuses the run |
+| **One sold stand stops the whole redraw update** | If the redraw would change the area of any sold stand, the entire update is refused with an explanatory error and nothing is written. The designer opens the Redraw model and fixes the design, then re-runs. | **Yes** — refused before anything is written, and checked again inside the merge |
+| **Area changes on a sold stand need approval** | Where a stand's area changes and the stand is sold, customer or commercial approval is required before the merge is actioned. Unsold stands do not require this. | **Partly** — the tool refuses the resize once it is in the redraw; the approval itself is a commercial process, outside the tool |
 | **Only redesigned stands are reportable** | A stand with no dimensional or area change is not a reportable change, even if it had to be redrawn or relocated (§5). | **Partly** — relocated, resized, added and removed stands are counted separately, but nothing is sent to the CRM |
+| **A sold stand may change shape but not area** | Where a sold stand keeps its area and changes shape, the change is allowed and reported as a warning to be raised with Sales. | **Yes** — `SOLD STAND DIMENSIONS` warning on the run |
 | **One redraw, one merge** | Once a redraw has been merged, the same redraw cannot be merged again. Further changes to the same stand start a new redraw from the current live plan. | **Yes** — create-redraw refuses to overwrite an existing redraw and its snapshot |
 | **The merge runs from the live plan** | The redraw must be closed. If the redraw is open, the merge refuses to run. | **Yes** |
 | **Boundaries are captured at the wall centreline** | Stand boundaries are recorded at the centre of the wall rather than the finish face, so the redraw and the live plan are always compared on the same basis. Area is calculated on the same basis. | **Yes** |
@@ -178,7 +181,7 @@ These rules bind the process. The last column says whether the current tool chec
 - **Shared walls no longer stop the merge.** A cluster of stands joined by shared walls now merges as one change: walls are matched, replaced, created and deleted, and both stands either side of a moved shared wall are rebuilt so the layout stays consistent. This was the largest manual gap and it is now closed for the two standard boundary wall types.
 - **The tool stops rather than guesses.** A cluster is skipped and reported — with the reason — when a wall it would touch carries a door, window or opening, when a boundary is not made of the two standard wall types or is drawn as a room separation line, when a stand sits on a different level than the snapshot, or when a room number is duplicated. Stand details for those stands are still written, so a skip costs geometry, not the whole amendment — except for a stand whose room number is duplicated, whose details are held back too.
 - **Added and removed stands are now handled.** A stand the redraw added is created with its room and its room tags; a stand the redraw deleted is deleted. Both are counted separately in the report.
-- **Sold stands are not checked by the tool.** Today a designer has to spot by eye that a redraw would resize a sold stand. That is the one gap where a missed check causes a commercial breach rather than a modelling inconvenience, and it is the next piece of work (§10 T1–T3).
+- **Sold stands are now checked.** A redraw that would resize or delete a sold stand is refused outright, and one that changes its shape is allowed with a warning. The one case the tool cannot see is a stand that was sold *after* the redraw was cut, because the sold status cannot be recorded in the snapshot; Sales confirms the sold list at approval (§4).
 - **Conflicts** — where the live plan and the redraw changed the same stand differently — are reported. With `Redraw Wins On Conflicts` off they are left for a person; with it on, the redraw wins automatically (§4). There is no tooling-assisted resolution beyond that switch.
 - **A merge is reviewed, not trusted.** Every run writes two files next to the redraw: an append-only log with one row per cluster and per stand detail, and a summary with the counts for the run. Both are the record of what was actually applied, and both are archived with the redraw.
 - **Stand heights and joins still need a visual check** after a merge, as do anything the redraw drew with non-standard walls.
@@ -192,11 +195,11 @@ Delivered today:
 - **Rebuild both stands either side of a shared wall** when that wall moves, so the geometry stays consistent.
 - **Report added, removed, moved and resized clusters separately**, so the run summary never conflates a new stand with a rebuilt one (§5).
 - **Split a shared wall** where the two stands' new boundaries no longer align, so each stand keeps its own boundary.
+- **Respect the sold-stand rule while rebuilding.** A rebuild that changes a sold stand's area refuses the whole redraw update, exactly as in §3.
 - **Handle added and removed stands** rather than leaving them to hand.
 
 Still missing — see §10:
 
-- **Respect the sold-stand rule while rebuilding.** A rebuild that would change a sold stand's area must fail the whole redraw update, exactly as in §3. Nothing checks this yet, so a shared-wall rebuild can resize a sold stand today.
 - **Resolve conflicts with a person in the loop** rather than only a global "redraw wins" switch.
 
 ```mermaid
@@ -207,10 +210,10 @@ flowchart TD
     C -->|Yes - resized| E["Counts as a merge change<br/>and a reportable change"]
     E --> F{"Is the stand sold?"}
     F -->|No| G["Merge as planned"]
-    F -->|Yes| H["Sold stand cannot be resized<br/>whole redraw update fails<br/>commercial decision needed via CRM<br/>NOT ENFORCED YET"]
+    F -->|Yes| H["Sold stand cannot be resized<br/>the whole redraw update is refused<br/>commercial decision needed via CRM"]
 ```
 
-That flow is live with two exceptions: the sold-stand branch at the bottom, and the per-stand split inside a rebuilt cluster — the run summary records the cluster, not each stand in it (§5, T5). Until the sold-stand check exists, the designer must catch it by eye before the merge.
+That flow is live with one exception: the per-stand split inside a rebuilt cluster — the run summary records the cluster, not each stand in it (§5, T5).
 
 ## 10. Tooling requirements arising from this process
 
@@ -218,7 +221,7 @@ These are the capabilities the process depends on. The State column says whether
 
 | # | Requirement | Why the process needs it | State |
 |---|---|---|---|
-| T1 | Detect sold stands whose area the redraw would change, and fail the **whole** redraw update with an explanatory error naming the stands | §3 — a sold stand must not be resized, and a partial merge must not be possible | **Not built.** The next piece of work |
+| T1 | Detect sold stands whose area the redraw would change, and fail the **whole** redraw update with an explanatory error naming the stands | §3 — a sold stand must not be resized, and a partial merge must not be possible | **Delivered.** The run refuses before the merge transaction opens, and checks the live area again before committing |
 | T2 | Read sold status and agreed area from the stand's Room parameter | T1 cannot work without it | **Available.** The parameter is maintained on the live plan by the CRM-linked plugin. Read it from the live plan, not the redraw — the redraw's copy was taken before the CRM update and is stale |
 | T3 | Recognise an authorised resize and allow the round to proceed | Without it, an approved CRM decision cannot be actioned and the round fails every time | **Not built.** Needs the Room parameter to carry the **agreed area**, not just a sold flag. If it is only a flag, the tool cannot tell an authorised resize from an unauthorised one |
 | T4 | Rebuild both stands either side of a moved shared wall | §9 — the majority of stands share walls | **Delivered.** Wall-level clustering in the merge, with per-cluster rollback |
@@ -226,7 +229,7 @@ These are the capabilities the process depends on. The State column says whether
 | T6 | Surface fatal reasons to the operator | A failed run must show why, not only a status | **Delivered.** Every output is wired to a watch, and the summary carries the first reason |
 | T7 | Default the merge graph to planning mode | The planning run is mandatory, so it must be the default | **Delivered.** The graph opens with applying switched off |
 | T8 | Name the merge graph's output watches | The geometry output and the conflicts output must be distinguishable | **Delivered.** Summary, Parameter Updates, Geometry Updates, Conflicts / Skips, and a separate QA / Errors watch |
-| T9 | Carry the sold parameter in the snapshot | The comparison needs it, so it must be part of the captured stand record. This changes the audited parameter list, which is a cross-graph contract change, not a local edit | **Not built.** Moderate; blocks T1 |
+| T9 | Carry the sold parameter in the snapshot | Would let the tool warn when a stand was sold after the redraw was cut | **Withdrawn.** Not possible: the create-redraw step saves the model, and the CRM plugin deletes `Status` on save, so the snapshot cannot record it. Sales confirms the sold list at approval instead |
 
 ## 11. Words used in this document
 
@@ -251,3 +254,4 @@ These are the capabilities the process depends on. The State column says whether
 |---|---|---|---|
 | 0.1 | 2026-11-21 | Initial draft, built from the current behaviour of the create-redraw and merge graphs | _TBC_ |
 | 0.2 | 2026-11-26 | Refreshed against the rebuilt merge graph: shared-wall clusters, added and removed stands, the `Redraw Wins On Conflicts` switch, the planning default, the undo and partial-merge wording, and the sold-stand status corrected from live to not built (§3, §4, §5, §7, §8, §9, §10) | _TBC_ |
+| 0.3 | 2026-11-26 | Sold-stand detection shipped: §3 and §7 mark it live, §8 records the one gap that remains (a stand sold after the redraw was cut), §9 adds the sold rule to the delivered list, §10 marks T1 delivered and withdraws T9, and §4 records the 0.5 mm tolerance | _TBC_ |

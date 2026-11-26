@@ -422,6 +422,38 @@ The Redraw can re-create a stand with the same Number at a new position. The new
 
 Dynamo always reports a parameter conflict. **Redraw Wins On Conflicts** never overwrites a conflicting parameter value.
 
+### 8.5 Sold stands
+
+Do not resize a sold stand. A sold stand has `Status` = `Sold` on its Room in Main.
+
+Dynamo checks sold stands before it applies a change. If a sold stand loses its area, Dynamo refuses the whole run:
+
+- Dynamo writes nothing to Main.
+- **Status** is `REFUSED`.
+- **Message** names each sold stand.
+- **QA / Errors** gives the reason for each stand.
+
+Dynamo refuses the run in these cases:
+
+- The Redraw resizes the sold stand.
+- A shared wall moves and the sold stand area changes because of it.
+- The Redraw deletes the sold stand.
+
+The area comparison has a small allowance. The allowance is the larger of 0.001 square meters or the stand perimeter multiplied by the tolerance. Dynamo cannot move a wall by less than the tolerance, so a smaller allowance would refuse correct runs.
+
+Dynamo also warns when a sold stand keeps its area but changes shape. The warning is `SOLD STAND DIMENSIONS`. The run continues. **Status** is `SUCCESS WITH WARNINGS`. Tell Sales before you publish.
+
+Dynamo reads `Status` from Main only. The Redraw has no `Status` parameter.
+
+The CRM plugin deletes `Status` when the model is saved. The plugin imports it again about two minutes later. If you run Dynamo before the import, Dynamo finds no `Status`:
+
+- In Apply mode, Dynamo refuses the run.
+- In Preview mode, Dynamo reports `SOLD STATUS UNAVAILABLE`.
+
+Wait for the import. Then run Dynamo again.
+
+Dynamo does not check `OnHold` stands in this version. Dynamo ignores `Available` stands and blank values.
+
 ---
 
 ## 9. Step 3 — Preview the Redraw
@@ -435,7 +467,7 @@ Preview compares the three floorplan states. It does not apply geometry or param
 | Input | Type | What it does | Saved default | Recommended use |
 |---|---|---|---|---|
 | **Directory Path** | Text | Selects the folder that contains the Redraw and the Baseline. | Blank | Select the approved folder on every run. |
-| **Comparison Tolerance** | Number slider | Sets the geometry difference that counts as a change, in meters. | `0.01` | Keep `0.01` unless support instructs otherwise. |
+| **Comparison Tolerance** | Number slider | Sets the geometry difference that counts as a change, in meters. | `0.0005` | Keep `0.0005` unless support instructs otherwise. See section 9.1.1. |
 | **Boundary Sample Spacing** | Number slider | Sets the sampling distance for complex boundaries, in meters. | `0.25` | Keep `0.25` unless support instructs otherwise. |
 | **Apply Updates** | Boolean selector | Selects Preview or Apply mode. | `False` | Use `False` for Preview. Use `True` for Apply. |
 | **Redraw Wins On Conflicts** | Boolean selector | Lets Redraw geometry win a geometry conflict. | `True` | Make sure that this input is correct before every run. See section 9.2. |
@@ -444,7 +476,7 @@ The graph has one text input, two number sliders, and two Boolean selectors. Use
 
 When the graph opens, the inputs show these values:
 
-- tolerance slider: `0.01`
+- tolerance slider: `0.0005`
 - spacing slider: `0.25`
 - **Apply Updates**: `False`
 - **Redraw Wins On Conflicts**: `True`
@@ -452,6 +484,19 @@ When the graph opens, the inputs show these values:
 Use these values to identify the inputs.
 
 Dynamo refuses a blank directory, a tolerance that is not a number or is negative, and a spacing that is not a positive number. Dynamo warns when the spacing is much larger than the tolerance.
+
+### 9.1.1 What the tolerance does
+
+The tolerance does not control how closely Dynamo draws a wall. Dynamo builds a new wall from the Redraw curve. The new wall is exact.
+
+The tolerance decides if an existing Main wall is the same wall as the Redraw wall:
+
+- If the wall is the same, Dynamo keeps the Main wall.
+- If the wall is different, Dynamo replaces it with the Redraw wall.
+
+Keep the tolerance small. A small tolerance makes Dynamo replace more walls. The stand areas then match the Redraw.
+
+The saved value is `0.0005` (0.5 mm). Do not increase it without support. A larger value can keep a Main wall that is not in the same position as the Redraw wall. The stand area then does not match.
 
 ### 9.2 The Redraw-wins default
 
@@ -477,7 +522,7 @@ When **Redraw Wins On Conflicts** is `True`, Dynamo still reports each conflict.
 5. Close the Redraw.
 6. Open **Compare and Update Redraw**.
 7. Select the **Directory Path**.
-8. Set the **Comparison Tolerance** slider to `0.01 m`.
+8. Set the **Comparison Tolerance** slider to `0.0005 m`.
 9. Set the **Boundary Sample Spacing** slider to `0.25 m`.
 10. Set **Apply Updates** to `False`.
 11. Set **Redraw Wins On Conflicts** to the value that you want to review.
@@ -554,8 +599,8 @@ CAUTION: A dry run leaves temporary preview elements in Main. Do not save or pub
 
 | Field | Values | Meaning |
 |---|---|---|
-| **Status** | `SUCCESS`, `SUCCESS WITH WARNINGS`, `COMPLETED WITH ERRORS`, `FAILED` | Overall result. |
-| **Message** | Text | The first skip or conflict reason. For a failed run, a failure count and a pointer to QA. |
+| **Status** | `SUCCESS`, `SUCCESS WITH WARNINGS`, `COMPLETED WITH ERRORS`, `REFUSED`, `FAILED` | Overall result. |
+| **Message** | Text | The first skip, conflict or sold-stand reason. For a failed run, a failure count and a pointer to QA. |
 | **Mode** | `DRY RUN`, `APPLIED` | Preview or Apply. |
 | **Audit** | `OK`, `FAILED`, `SKIPPED` | Result of the CSV audit write. |
 | **Clusters** | Number | Geometry clusters planned or verified in this run. |
@@ -565,10 +610,13 @@ CAUTION: A dry run leaves temporary preview elements in Main. Do not save or pub
 | **Skipped** | Number | Changes that Dynamo did not process. |
 | **Errors** | Number | Failed or verification-failed changes. |
 | **Conflicts** | Number | Geometry and parameter conflicts. |
+| **Sold status** | `PRESENT`, `MISSING` | Shows if Dynamo found the `Status` parameter in Main. |
+| **Sold stand blocks** | Number | Sold stands that would change area. An Apply run refuses these. |
+| **Sold stand warnings** | Number | Sold stands that keep their area and change shape. |
 | **Redraw document closed** | `YES`, `NO`, `NOT OPENED` | Result of closing the Redraw document. |
 | **Preview** | Text | What the Preview drew or cleared. |
 | **Undo** | Text | The transaction to undo, or `NOT REQUIRED`. |
-| **Error** | Text | The fatal reason. This field appears only when **Status** is `FAILED`. |
+| **Error** | Text | The refusal or fatal reason. This field appears only when **Status** is `REFUSED` or `FAILED`. |
 | **Trace** | Text | The Python trace. This field appears only when **Status** is `FAILED`. |
 
 ### 11.2 Status meanings
@@ -576,8 +624,9 @@ CAUTION: A dry run leaves temporary preview elements in Main. Do not save or pub
 | Status | Meaning |
 |---|---|
 | `SUCCESS` | No change failed, no change was skipped, and no conflict was reported. |
-| `SUCCESS WITH WARNINGS` | The run completed, but one or more changes were skipped or one or more conflicts were reported. |
+| `SUCCESS WITH WARNINGS` | The run completed, but one or more changes were skipped, one or more conflicts were reported, or a sold stand changed shape. |
 | `COMPLETED WITH ERRORS` | One or more changes failed, or one or more changes failed verification. |
+| `REFUSED` | A safety rule stopped the run before Dynamo wrote anything. Read **Error** and **QA / Errors**. Fix the Redraw or wait, then run again. There is no trace because this is not a fault in Dynamo. |
 | `FAILED` | The run stopped before it completed. Read **Error**, **Trace**, and **QA / Errors**. |
 
 A `SUCCESS` status does not prove that every Redraw change was applied. It proves that nothing was skipped, conflicted, or failed. A run with nothing to merge also reports `SUCCESS`. Read the counts to make sure that Dynamo saw the expected changes. Always review the detailed outputs.
@@ -858,6 +907,10 @@ Treat the audit files as project records. They can contain stand data. Do not pu
 | `Parameter not found in Main` or `Parameter is read-only` or `Parameter is not text` | Make the parameter available and writable in Main as text. |
 | `Main does not match the Redraw after the update` or `Main value does not match Redraw after update` | Use Undo, correct the problem, then run Apply again. |
 | `Audit` is `FAILED` | Make sure that the Redraw folder has write permission and free disk space. |
+| `A sold stand must not be resized by the Redraw` | Fix the Redraw so each named sold stand keeps its area, or get a commercial decision through the CRM. Then run again. |
+| `The Status parameter is not present in Main` | Wait about two minutes for the CRM plugin to import `Status`, then run again. |
+| `SOLD STATUS UNAVAILABLE` in Preview | Wait about two minutes for the CRM plugin to import `Status`, then run Preview again. |
+| `SOLD STAND DIMENSIONS` warning | The sold stand keeps its area but changes shape. Tell Sales before you apply. |
 
 ---
 
@@ -881,7 +934,8 @@ Treat the audit files as project records. They can contain stand data. Do not pu
 - [ ] Main is active and saved.
 - [ ] The Redraw is closed.
 - [ ] The correct Redraw folder is selected.
-- [ ] The Comparison Tolerance slider is `0.01 m`.
+- [ ] The Comparison Tolerance slider is `0.0005 m`.
+- [ ] **Sold status** in the Summary is `PRESENT`.
 - [ ] The Boundary Sample Spacing slider is `0.25 m`.
 - [ ] **Apply Updates** is `False`.
 - [ ] **Redraw Wins On Conflicts** is set for this review.

@@ -49,6 +49,25 @@ def install_stubs():
 
     revit.ElementId = ElementId
 
+    class UnitTypeId(object):
+        Meters = 'Meters'
+        SquareMeters = 'SquareMeters'
+
+    revit.UnitTypeId = UnitTypeId
+
+    class UnitUtils(object):
+        """Only the conversions graph 2 uses, with Revit's own factors."""
+
+        @staticmethod
+        def ConvertToInternalUnits(value, unit):
+            if unit == 'Meters':
+                return float(value) * 3.280839895013123
+            if unit == 'SquareMeters':
+                return float(value) * 10.763910416709722
+            raise ValueError('unsupported unit %r' % (unit,))
+
+    revit.UnitUtils = UnitUtils
+
     class SpatialElementBoundaryLocation(object):
         Center = 'Center'
         Finish = 'Finish'
@@ -1338,6 +1357,197 @@ def test_refused_room_move_raises():
     finally:
         graph2.XYZ = original
 
+
+
+# --------------------------------------------------------------------------
+# sold stands
+# --------------------------------------------------------------------------
+class StubParameter(object):
+    def __init__(self, text):
+        self.text = text
+        self.HasValue = True
+
+    def AsString(self):
+        return self.text
+
+    def AsValueString(self):
+        return self.text
+
+
+class StubRoom(object):
+    """A Room with only the parameters a sold check reads."""
+
+    def __init__(self, parameters=None, area=None):
+        self.parameters = parameters or {}
+        self.Area = area
+
+    def LookupParameter(self, name):
+        return self.parameters.get(name)
+
+
+def square(number, width=3.0, height=3.0, x=0.0, y=0.0, element_id=1):
+    """A rectangular stand, so its area and perimeter are easy to reason about."""
+    walls = [(element_id, Curve(x, y, x + width, y)),
+             (element_id + 1, Curve(x + width, y, x + width, y + height)),
+             (element_id + 2, Curve(x + width, y + height, x, y + height)),
+             (element_id + 3, Curve(x, y + height, x, y))]
+    return stand(number, walls, element_id)
+
+
+def as_sold(state, area, status='sold'):
+    state['status'] = status
+    state['area'] = area
+    return state
+
+
+def sold_plan(base, main, redraw, tol=0.001):
+    gplan, pplan, issues = plan(base, main, redraw)
+    blockers, warnings, checked = graph2.sold_check(main, redraw, gplan, tol)
+    return gplan, blockers, warnings, checked
+
+
+def test_status_normalises_and_ignores_other_states():
+    for text, expected in [('Sold', 'sold'), ('SOLD', 'sold'), (' sold ', 'sold'),
+                           ('On Hold', 'onhold'), ('OnHold', 'onhold'),
+                           ('Available', 'available'), ('On_Hold', 'onhold')]:
+        got = graph2.status_of(StubRoom({'Status': StubParameter(text)}))
+        check(got == expected, 'status %r should normalise to %r, got %r'
+              % (text, expected, got))
+    check(graph2.status_of(StubRoom({})) is None,
+          'a Room with no Status parameter should read as None, not as blank')
+
+
+def test_status_present_tells_absent_from_blank():
+    check(not graph2.status_present({'A': {'status': None}}),
+          'no Status anywhere in Main should read as absent')
+    check(not graph2.status_present({}), 'no stands at all is absent')
+    check(graph2.status_present({'A': {'status': ''}}),
+          'a blank value still means the parameter exists')
+    check(graph2.status_present({'A': {'status': 'available'}}), 'available is present')
+
+
+def test_sold_stand_area_change_blocks_the_run():
+    base = {'S01': as_sold(square('S01'), 9.0)}
+    main = {'S01': as_sold(square('S01'), 9.0)}
+    redraw = {'S01': as_sold(square('S01', height=4.0), 12.0)}
+    gplan, blockers, warnings, checked = sold_plan(base, main, redraw)
+    check(gplan and gplan[0]['status'] == 'PLANNED',
+          'the fixture should plan a change, got %r' % [op['status'] for op in gplan])
+    check(len(blockers) == 1, 'a resize of a sold stand must block, got %r' % (blockers,))
+    check(blockers and blockers[0][1] == 'S01', 'the blocker should name the stand')
+    check(blockers and blockers[0][0] == gplan[0]['cluster'],
+          'the blocker should name the cluster, so a dry run can mark it')
+    check('S01' in checked, 'the stand should be recorded as checked')
+
+
+def test_sold_stand_within_the_allowance_is_clean():
+    base = {'S01': as_sold(square('S01'), 9.0)}
+    main = {'S01': as_sold(square('S01'), 9.0)}
+    redraw = {'S01': as_sold(square('S01', height=3.001), 9.003)}
+    gplan, blockers, warnings, checked = sold_plan(base, main, redraw)
+    check(not blockers, 'a move inside the allowance must not block, got %r' % (blockers,))
+    check(not warnings, 'a move inside the allowance must not warn, got %r' % (warnings,))
+
+
+def test_sold_stand_that_keeps_its_area_but_changes_shape_warns():
+    base = {'S01': as_sold(square('S01'), 9.0)}
+    main = {'S01': as_sold(square('S01'), 9.0)}
+    # 4.5 x 2 is the same 9 sqft with a longer perimeter.
+    redraw = {'S01': as_sold(square('S01', width=4.5, height=2.0), 9.0)}
+    gplan, blockers, warnings, checked = sold_plan(base, main, redraw)
+    check(not blockers, 'the same area must not block, got %r' % (blockers,))
+    check(len(warnings) == 1, 'a shape change should warn, got %r' % (warnings,))
+    check(warnings and 'perimeter' in warnings[0][2],
+          'the warning should say the perimeter changed')
+
+
+def test_an_unsold_stand_is_not_checked():
+    base = {'A01': as_sold(square('A01'), 9.0, status='available')}
+    main = {'A01': as_sold(square('A01'), 9.0, status='available')}
+    redraw = {'A01': as_sold(square('A01', height=4.0), 12.0, status='available')}
+    gplan, blockers, warnings, checked = sold_plan(base, main, redraw)
+    check(not blockers and not warnings, 'an Available stand may be resized')
+    check(not checked, 'an Available stand is not a checked stand')
+
+
+def test_on_hold_is_ignored():
+    base = {'H01': as_sold(square('H01'), 9.0, status='onhold')}
+    main = {'H01': as_sold(square('H01'), 9.0, status='onhold')}
+    redraw = {'H01': as_sold(square('H01', height=4.0), 12.0, status='onhold')}
+    gplan, blockers, warnings, checked = sold_plan(base, main, redraw)
+    check(not blockers and not warnings, 'OnHold does not block, by decision')
+
+
+def test_a_sold_stand_in_a_skipped_cluster_is_not_checked():
+    base = {'S01': as_sold(square('S01'), 9.0)}
+    main = {'S01': as_sold(square('S01'), 9.0)}
+    redraw = {'S01': as_sold(square('S01', height=4.0), 12.0)}
+    gplan, pplan, issues = plan(base, main, redraw)
+    for op in gplan:
+        op['status'] = 'SKIPPED'
+        op['reason'] = 'blocked for another reason'
+    blockers, warnings, checked = graph2.sold_check(main, redraw, gplan, 0.001)
+    check(not blockers, 'a cluster this run will not apply cannot resize anything')
+    check(not checked, 'a stand in a skipped cluster is not checked')
+
+
+def test_a_sold_stand_the_redraw_deletes_blocks():
+    base = {'S01': as_sold(square('S01'), 9.0), 'B01': square('B01', x=20.0)}
+    main = {'S01': as_sold(square('S01'), 9.0), 'B01': square('B01', x=20.0)}
+    redraw = {'B01': square('B01', x=20.0)}
+    gplan, blockers, warnings, checked = sold_plan(base, main, redraw)
+    check(any(op.get('change') == 'REMOVED' for op in gplan),
+          'the fixture should plan a deletion, got %r' % [op.get('change') for op in gplan])
+    check(len(blockers) == 1, 'deleting a sold stand must block, got %r' % (blockers,))
+    check(blockers and 'deletes a sold stand' in blockers[0][2],
+          'the reason should say the stand is deleted')
+
+
+def test_area_allowance_is_derived_from_the_perimeter():
+    floor = graph2.area_allowance(0.0, 0.001)
+    check(abs(floor - 0.0107639) < 0.0001,
+          'the floor should be 0.001 m2 in square feet, got %r' % floor)
+    big = graph2.area_allowance(30.0, 0.001)
+    check(abs(big - 0.03) < 1e-9,
+          'a long perimeter should set the allowance, got %r' % big)
+    tighter = graph2.area_allowance(30.0, 0.0005)
+    check(tighter < big, 'halving the tolerance should halve the allowance')
+
+
+def test_the_refusal_names_the_stands_and_the_rule():
+    blockers = [('c1', 'S01', 'sold stand area would change: 9.000 -> 12.000 sqft'),
+                ('c1', 'S02', 'the Redraw deletes a sold stand')]
+    message = graph2.sold_message(blockers)
+    check('S01' in message and 'S02' in message, 'the message should name both stands')
+    check('must not be resized' in message, 'the message should state the rule')
+    check('CRM' in message, 'the message should say where a decision comes from')
+
+
+def test_the_merge_is_checked_again_before_it_commits():
+    after = StubRoom(area=12.0)
+    state = as_sold(square('S01'), 9.0)
+    state['room'] = after
+    main = {'S01': state}
+    redraw = {'S01': {'area': 9.0}}
+    drift = graph2.merge_sold_drift(main, redraw, {'S01'})
+    check(len(drift) == 1, 'an area that moved anyway must be caught, got %r' % (drift,))
+    check(drift and drift[0][2].startswith('acknowledged area'),
+          'the drift should quote both areas, got %r' % (drift,))
+    after.Area = 9.0
+    check(not graph2.merge_sold_drift(main, redraw, {'S01'}),
+          'an area that matches the Redraw is clean')
+    after.Area = None
+    drift = graph2.merge_sold_drift(main, redraw, {'S01'})
+    check(len(drift) == 1, 'a sold stand with no area is drift, got %r' % (drift,))
+
+
+def test_sold_warnings_make_the_run_warn():
+    issues = [{'stand': 'S01', 'type': 'SOLD STAND DIMENSIONS',
+               'reason': 'sold stand keeps its area but changes shape'}]
+    status, message, failed, skipped, conflicts = graph2.judge_run([], [], issues)
+    check(status == 'SUCCESS WITH WARNINGS',
+          'a sold-shape warning should not read as SUCCESS, got %r' % status)
+    check('shape' in message, 'the summary should carry the reason, got %r' % message)
 
 def main():
     tests = [value for name, value in sorted(globals().items())

@@ -105,12 +105,24 @@ Top level: `schema_version`, `snapshot_type: "REDRAW_BASELINE"`, `baseline_id` (
 
 ## 3. Graph 2 — Compare and Update
 
-Inputs: `IN[0]` Redraw directory, `IN[1]` tolerance metres (default 0.01),
-`IN[2]` boundary sample spacing metres (default 0.25), `IN[3]` `Apply Updates`
-(default False in code and **false in the saved graph**), `IN[4]`
-`Redraw Wins On Conflicts` (default False in code, **true in the saved graph**).
-Metres are converted to internal feet via `UnitUtils`.
+Inputs: `IN[0]` Redraw directory, `IN[1]` tolerance metres (default 0.0005, and
+**0.0005 in the saved graph**), `IN[2]` boundary sample spacing metres (default
+0.25), `IN[3]` `Apply Updates` (default False in code and **false in the saved
+graph**), `IN[4]` `Redraw Wins On Conflicts` (default False in code, **true in
+the saved graph**). Metres are converted to internal feet via `UnitUtils`.
 `OUT = (summary, pout, gout, issues, qa)`; all five are wired to watches.
+
+On the tolerance: it does not limit how closely a rebuilt wall follows the
+drawing, because a created or replaced wall is built from the Redraw's own
+`Curve`. It decides whether an existing Main wall is "already the same wall"
+(kept where Main has it) or is replaced, and whether a Main wall counts as
+unchanged since the Redraw was cut. Untouched walls are bit-identical - the
+Redraw is a copy of Main - so the tolerance only has to separate identical from
+edited. At the old 10 mm a wall 9 mm out stayed in Main's position and moved the
+area; 0.5 mm makes a touched wall be replaced. Straight walls compare by
+endpoints, so this costs nothing; curved walls match through 17 sampled points
+per curve, so their resolution is coarser but an unchanged arc still matches
+exactly.
 
 `check_inputs` rejects a blank directory, a tolerance that is not a number or is
 negative, and a spacing that is not a positive number, each with a message that
@@ -209,14 +221,49 @@ each stand's state to the QA, when any of these hold:
 A `Location.Move` that Revit refuses (returns false) raises, so that cluster rolls
 back instead of silently staying put.
 
+### Sold stands
+A sold stand must not be resized by the designer, so the merge refuses rather than
+applying a partial result. `Status` is a Room parameter that the CRM plugin owns:
+it lives in **Main only** (the Redraw has no such parameter) and the plugin
+deletes it when the model is saved and re-imports it about two minutes later.
+
+- `state()` reads `Status` from Main and normalises it (case, spaces, underscores,
+  hyphens). Only `sold` blocks; `OnHold`, `Available` and a blank do not.
+- `status_present(m)` is a document-wide check: the parameter is on every Room or
+  none. If it is absent, a preview reports `SOLD STATUS UNAVAILABLE` in `issues`
+  and the Summary, and an apply raises `Refused` with the wait-and-rerun message.
+- `sold_check` examines only clusters the planner would apply, so a sold stand in
+  a cluster skipped for another reason cannot block the run. Per sold stand:
+  - the Redraw deletes it -> blocker, because the area would go to zero;
+  - the Redraw's area differs from Main's by more than
+    `area_allowance = max(0.001 m2, perimeter x tolerance)` -> blocker;
+  - the area is within the allowance but the perimeter moved by more than it ->
+    `SOLD STAND DIMENSIONS` warning in `issues`, which makes the run
+    `SUCCESS WITH WARNINGS` but does not block.
+- A blocker raises `Refused` before the merge transaction opens, so nothing is
+  written and no cluster is half-applied. The Summary status is `REFUSED`, the
+  message names every stand and says the Redraw or the CRM decision has to
+  change, and the audit log records one `REFUSED` row. There is no traceback: a
+  business rule refused the run, it did not crash.
+- A dry run writes nothing, so instead of refusing it marks each blocked cluster
+  `SKIPPED` with the reason, which also draws it magenta in the preview.
+- Defence in depth: inside the merge transaction, after the clusters and the
+  parameter writes, `doc.Regenerate()` runs and `merge_sold_drift` compares each
+  checked sold stand's live `Room.Area` with the Redraw's. Any drift rolls the
+  whole merge transaction back and raises `Refused`.
+
 ### Statuses, the summary and the audit trail
 `judge_run` sets `Summary['Status']`: `COMPLETED WITH ERRORS` if any change is
 `FAILED`/`VERIFY_FAILED`, otherwise `SUCCESS WITH WARNINGS` if any change was
-skipped or any issue is a conflict, otherwise `SUCCESS`. `Summary['Message']`
-carries the first skip/conflict reason (or a failure count), so the always-visible
-watch says why. `Summary['Audit']` is `OK`, `FAILED` or `SKIPPED` (no folder to
-write to). Skips stay visible in `gout` with their reason, so a dry run does not
-report a blocked cluster as mergeable.
+skipped, any issue is a conflict, or any issue is a sold-stand warning, otherwise
+`SUCCESS`. `Summary['Message']` carries the first skip/conflict/sold reason (or a
+failure count), so the always-visible watch says why. `Summary['Audit']` is `OK`,
+`FAILED` or `SKIPPED` (no folder to write to). A run refused by a business rule
+ends with the top-level status `REFUSED`, which is separate from `FAILED`
+(crash) and `COMPLETED WITH ERRORS` (change-level failures). Skips stay visible
+in `gout` with their reason, so a dry run does not report a blocked cluster as
+mergeable. `Summary` also carries `Sold status` (`PRESENT`/`MISSING`),
+`Sold stand blocks` and `Sold stand warnings`.
 
 Every run writes two CSVs next to the Redraw (both gitignored). The log is
 appended and the summary is rewritten:
@@ -326,6 +373,20 @@ offline. Straight walls are matched by their ends, which is exact and O(1).
 - **The audit trail is a file contract** — an append-only per-cluster/per-parameter
   log and a rewritten per-run summary next to the Redraw. Both are gitignored so a
   local run cannot publish stand data. A failed run still records `RUN FAILED`.
+- **The tolerance is an identity test, not an accuracy setting** — a rebuilt wall is
+  the Redraw's own curve, so it is exact whatever the tolerance. What the tolerance
+  decides is whether an existing Main wall is "the same wall" (kept) or replaced.
+  Untouched walls are bit-identical because the Redraw is a copy, so the default is
+  0.5 mm: an edited wall is rebuilt, and the area cannot be left 10 mm out by a wall
+  that was merely "close enough". Straight walls compare by endpoints, so this is
+  free; curved walls are sampled, which is why 0.5 mm is the floor rather than zero.
+- **A sold stand refuses the run, it does not skip a cluster** — the commercial rule
+  is that no part of a redraw may merge if a sold stand's area would change, so the
+  check is a run-level gate before the transaction, with a second check of the live
+  `Room.Area` inside the transaction before the commit. Only `sold` blocks; `OnHold`
+  and `Available` do not. The area allowance is derived from the perimeter and the
+  tolerance rather than guessed, because a rebuild that keeps a wall within the
+  tolerance can legitimately move the area by about that much.
 
 ## 5. Revit API facts relied on (verified against docs)
 

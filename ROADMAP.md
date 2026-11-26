@@ -49,6 +49,21 @@ change to either graph. Tick the boxes during each pass.
 - [ ] Hosted elements: put a door or window in a Main wall that the cluster would
       replace/delete → the cluster is skipped, the issue names the hosted element,
       and the door survives.
+- [ ] Sold stands: set `Status` = `Sold` on a stand, resize it in the Redraw → Apply
+      is `REFUSED`, nothing is written, the message names the stand, and one
+      `REFUSED` row lands in the audit log; Preview marks the cluster `SKIPPED`
+      and reports `SOLD STAND AREA`. Delete a sold stand in the Redraw → also
+      refused. Move a sold stand without changing its area → the run applies and
+      says `SUCCESS`. Change its shape at the same area (e.g. 3x3 → 4.5x2) → the
+      run applies and says `SUCCESS WITH WARNINGS` with `SOLD STAND DIMENSIONS`.
+- [ ] Sold stands with no `Status`: save Main and run Apply within two minutes →
+      `REFUSED` with the wait-and-rerun message; Preview reports
+      `SOLD STATUS UNAVAILABLE` and still draws. After the CRM import, the same
+      run is clean and `Sold status` reads `PRESENT`.
+- [ ] Tolerance: a wall 2 mm out of position in the Redraw is replaced, not kept
+      (the saved default is 0.0005 m). Confirm the `retained` count stays at zero
+      on an untouched stand, i.e. the tight tolerance does not turn Revit's own
+      rounding into phantom Main work.
 - [ ] Duplicate/blank Numbers: two Rooms with the same Number → the geometry
       cluster is quarantined; the duplicated stand's parameters stay as Main has
       them, while other stands in the cluster can still get parameter updates. A
@@ -108,6 +123,22 @@ change to either graph. Tick the boxes during each pass.
 - **Wall rebuild** copies type/height/offset/flipped and the wall's own level from
   the Redraw; height fallback 10 ft; joins and wall-type variations beyond the two
   RX types are not handled.
+- **Curved walls match by sampling, not analytically** — `wall_points` gives a
+  `Line` two endpoints and any other curve 17 sampled points, and `curve_distance`
+  resamples at the spacing, so a curved wall's matching resolution is coarser than
+  the 0.5 mm tolerance (chord error is a few millimetres). An unchanged arc still
+  matches exactly, because both sides sample the same geometry, so a curved stand
+  is not misread as changed. What is not exact is how small a real difference a
+  curved wall can reveal. Straight walls compare by endpoints and are exact. Do
+  not lower the spacing to compensate: `curve_distance` is O((length/spacing)^2)
+  and the verification runs it per cluster.
+- **Sold-stand detection reads a parameter the CRM plugin owns** — `Status` is in
+  Main only and is deleted on save, so for about two minutes after a save an apply
+  is refused (`REFUSED`, wait-and-rerun) and a preview reports
+  `SOLD STATUS UNAVAILABLE`. Only `sold` blocks; `OnHold` is deliberately ignored.
+  Whether a stand became sold *during* the redraw cannot be detected, because the
+  snapshot cannot record `Status` (graph 1 saves Main, which deletes it); that
+  history lives in the CRM.
 - **Cloud/temp cleanup is best effort** — graph 1 tries to reactivate Main and
   close/delete the temp central, but Revit may refuse to close a document hosting
   the Dynamo run. In that case the summary warns and the operator must clean up
