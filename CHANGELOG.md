@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-26 — Business process document
+
+- Added `BUSINESS_PROCESS.md`: business-facing overview of the Redraw workflow, written
+  for the Confluence page. Covers the direct-edit vs redraw routing, cluster scoping,
+  the seven-stage process, the three-way merge logic, merge-change vs reportable-change
+  counts, roles, business rules, current manual gaps, the shared-wall target state, and
+  the tooling requirements the process depends on. The three Mermaid diagrams are
+  validated against the Mermaid parser.
+- `AGENTS.md`: added `BUSINESS_PROCESS.md` to the supporting docs list, with the rule
+  that it changes in the same commit as any behaviour that alters the process it
+  describes.
+
 ## 2026-11-23 — In-Revit validation recorded; parameter docs aligned; process diagram
 
 - **The rebuilt graph is validated in Revit 2027.** `ROADMAP.md` section 1 is now
